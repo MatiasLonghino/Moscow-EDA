@@ -6,3 +6,6 @@ scipy
 scikit-learn
 statsmodels
 kagglehub
+mlflow
+dagshub
+python-dotenv
