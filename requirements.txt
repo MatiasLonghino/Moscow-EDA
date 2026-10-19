@@ -9,3 +9,4 @@ kagglehub
 mlflow
 dagshub
 python-dotenv
+jinja2

@@ -1,2 +1,12 @@
+# Credenciales
+.env
+.env.*
+!.env.example
+
 # Entorno virtual
 .venv/
+venv/
+
+# Archivos temporales de Python
+__pycache__/
+.ipynb_checkpoints/
