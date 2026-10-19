@@ -1,12 +1,11 @@
 numpy
 pandas
 matplotlib
+mlflow
+dagshub
+python-dotenv
 seaborn
 scipy
 scikit-learn
 statsmodels
 kagglehub
-mlflow
-dagshub
-python-dotenv
-jinja2
