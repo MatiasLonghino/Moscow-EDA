@@ -1,6 +1,9 @@
 numpy
 pandas
 matplotlib
+mlflow
+dagshub
+python-dotenv
 seaborn
 scipy
 scikit-learn
