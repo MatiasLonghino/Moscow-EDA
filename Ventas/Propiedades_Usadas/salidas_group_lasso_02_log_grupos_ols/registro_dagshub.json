@@ -1,0 +1,8 @@
+{
+  "run_id": "ac9faf6b61db4a7f8e274553199c5658",
+  "experiment_id": "5",
+  "experiment_name": "Modelos Propiedades_Usadas",
+  "run_name": "GroupLasso_02_Log_Grupos_OLS",
+  "status": "FINISHED",
+  "url": "https://dagshub.com/matiasgastonlonghino/MOSCOW_IDA.mlflow/#/experiments/5/runs/ac9faf6b61db4a7f8e274553199c5658"
+}

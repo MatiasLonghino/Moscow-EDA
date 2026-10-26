@@ -1,0 +1,133 @@
+[
+  {
+    "iteracion": 1,
+    "caracteristica_incorporada": "district",
+    "mejor_candidata": "district",
+    "aceptada": true,
+    "caracteristicas_acumuladas": [
+      "district"
+    ],
+    "rmse_validacion": 4006722.075019339,
+    "rmse_mejor_candidato": 4006722.075019339,
+    "mejora_pct": 34.026245753980724,
+    "n_predictores": 128
+  },
+  {
+    "iteracion": 2,
+    "caracteristica_incorporada": "total_area",
+    "mejor_candidata": "total_area",
+    "aceptada": true,
+    "caracteristicas_acumuladas": [
+      "district",
+      "total_area"
+    ],
+    "rmse_validacion": 3072722.6441681148,
+    "rmse_mejor_candidato": 3072722.6441681148,
+    "mejora_pct": 23.310811515338663,
+    "n_predictores": 129
+  },
+  {
+    "iteracion": 3,
+    "caracteristica_incorporada": "renovation",
+    "mejor_candidata": "renovation",
+    "aceptada": true,
+    "caracteristicas_acumuladas": [
+      "district",
+      "total_area",
+      "renovation"
+    ],
+    "rmse_validacion": 2725971.3468511873,
+    "rmse_mejor_candidato": 2725971.3468511873,
+    "mejora_pct": 11.284822532715257,
+    "n_predictores": 132
+  },
+  {
+    "iteracion": 4,
+    "caracteristica_incorporada": "date_posted_dt",
+    "mejor_candidata": "date_posted_dt",
+    "aceptada": true,
+    "caracteristicas_acumuladas": [
+      "district",
+      "total_area",
+      "renovation",
+      "date_posted_dt"
+    ],
+    "rmse_validacion": 2296175.9865590944,
+    "rmse_mejor_candidato": 2296175.9865590944,
+    "mejora_pct": 15.766686645057964,
+    "n_predictores": 133
+  },
+  {
+    "iteracion": 5,
+    "caracteristica_incorporada": "building_type",
+    "mejor_candidata": "building_type",
+    "aceptada": true,
+    "caracteristicas_acumuladas": [
+      "district",
+      "total_area",
+      "renovation",
+      "date_posted_dt",
+      "building_type"
+    ],
+    "rmse_validacion": 1890591.402193826,
+    "rmse_mejor_candidato": 1890591.402193826,
+    "mejora_pct": 17.663479922244644,
+    "n_predictores": 138
+  },
+  {
+    "iteracion": 6,
+    "caracteristica_incorporada": "metro_distance_min",
+    "mejor_candidata": "metro_distance_min",
+    "aceptada": true,
+    "caracteristicas_acumuladas": [
+      "district",
+      "total_area",
+      "renovation",
+      "date_posted_dt",
+      "building_type",
+      "metro_distance_min"
+    ],
+    "rmse_validacion": 1692372.618868014,
+    "rmse_mejor_candidato": 1692372.618868014,
+    "mejora_pct": 10.484485600421143,
+    "n_predictores": 139
+  },
+  {
+    "iteracion": 7,
+    "caracteristica_incorporada": "metro_distance_type",
+    "mejor_candidata": "metro_distance_type",
+    "aceptada": true,
+    "caracteristicas_acumuladas": [
+      "district",
+      "total_area",
+      "renovation",
+      "date_posted_dt",
+      "building_type",
+      "metro_distance_min",
+      "metro_distance_type"
+    ],
+    "rmse_validacion": 1612615.1514357796,
+    "rmse_mejor_candidato": 1612615.1514357796,
+    "mejora_pct": 4.712760449030558,
+    "n_predictores": 140
+  },
+  {
+    "iteracion": 8,
+    "caracteristica_incorporada": null,
+    "mejor_candidata": "ceiling_height",
+    "aceptada": false,
+    "caracteristicas_acumuladas": [
+      "district",
+      "total_area",
+      "renovation",
+      "date_posted_dt",
+      "building_type",
+      "metro_distance_min",
+      "metro_distance_type"
+    ],
+    "rmse_validacion": 1612615.1514357796,
+    "rmse_mejor_candidato": 1605326.345534986,
+    "mejora_pct": 0.451986693434216,
+    "n_predictores": 140
+  }
+]

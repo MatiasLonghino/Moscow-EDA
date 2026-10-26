@@ -1,0 +1,2 @@
+eliminada,predictora_relacionada,correlation_train,vif_reference,vif_new,coefficient_reference_log,coefficient_new_log,pvalue_reference_nonrobust,pvalue_new_nonrobust
+living_area,total_area,0.9630597089814101,17.43120210819166,4.662993495742973,0.0156505766982553,0.015780722572680664,0.0,0.0

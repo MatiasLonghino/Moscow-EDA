@@ -1,0 +1,10 @@
+{
+  "dataset_sha256": "12fe313ce35f77af04ba22c09c4327058fe4850d1fa9a863a1755f89e2042a86",
+  "reference_run_id": "f68265a7164742159c9807d91fa4f8e5",
+  "mismas_filas_train": true,
+  "target": "ln(Target)",
+  "inversa": "exp sin corrección",
+  "aic_bic": "statsmodels_gaussian_log_RUB_k_rank",
+  "evaluacion": "Train completo; validación de selección separada",
+  "metricas_historicas": "MLflow exclusivamente"
+}

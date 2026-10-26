@@ -1,0 +1,166 @@
+[
+  {
+    "n_caracteristicas": 1,
+    "lambda": 0.3213952992184646,
+    "seleccionadas": [
+      "metro_distance_min"
+    ],
+    "rmse_referencia": 6073206.111748744,
+    "rmse_validation_original": 4782034.2317441385,
+    "mejora_pct": 21.26013601789023,
+    "aceptado": true
+  },
+  {
+    "n_caracteristicas": 2,
+    "lambda": 0.18891667343597393,
+    "seleccionadas": [
+      "total_area",
+      "metro_distance_min"
+    ],
+    "rmse_referencia": 4782034.2317441385,
+    "rmse_validation_original": 4161938.347578132,
+    "mejora_pct": 12.967198771804703,
+    "aceptado": true
+  },
+  {
+    "n_caracteristicas": 3,
+    "lambda": 0.0930203527171206,
+    "seleccionadas": [
+      "total_area",
+      "metro_distance_min",
+      "date_posted_dt"
+    ],
+    "rmse_referencia": 4161938.347578132,
+    "rmse_validation_original": 3982162.8359497846,
+    "mejora_pct": 4.319514048855634,
+    "aceptado": true
+  },
+  {
+    "n_caracteristicas": 5,
+    "lambda": 0.06527273764587296,
+    "seleccionadas": [
+      "total_area",
+      "metro_distance_min",
+      "metro_distance_type",
+      "renovation",
+      "date_posted_dt"
+    ],
+    "rmse_referencia": 3982162.8359497846,
+    "rmse_validation_original": 3716789.2885834407,
+    "mejora_pct": 6.664055647615166,
+    "aceptado": true
+  },
+  {
+    "n_caracteristicas": 6,
+    "lambda": 0.05467751283199162,
+    "seleccionadas": [
+      "total_area",
+      "metro_distance_min",
+      "metro_to_center_km",
+      "metro_distance_type",
+      "renovation",
+      "date_posted_dt"
+    ],
+    "rmse_referencia": 3716789.2885834407,
+    "rmse_validation_original": 3519412.303754952,
+    "mejora_pct": 5.310416316436225,
+    "aceptado": true
+  },
+  {
+    "n_caracteristicas": 7,
+    "lambda": 0.03836742009638251,
+    "seleccionadas": [
+      "total_area",
+      "metro_distance_min",
+      "metro_to_center_km",
+      "metro_distance_type",
+      "building_type",
+      "renovation",
+      "date_posted_dt"
+    ],
+    "rmse_referencia": 3519412.303754952,
+    "rmse_validation_original": 3341489.6901736935,
+    "mejora_pct": 5.055463759998456,
+    "aceptado": true
+  },
+  {
+    "n_caracteristicas": 8,
+    "lambda": 0.015825127317339885,
+    "seleccionadas": [
+      "total_area",
+      "metro_distance_min",
+      "metro_to_center_km",
+      "metro_distance_type",
+      "building_type",
+      "renovation",
+      "district",
+      "date_posted_dt"
+    ],
+    "rmse_referencia": 3341489.6901736935,
+    "rmse_validation_original": 1611944.0449718954,
+    "mejora_pct": 51.75971813673005,
+    "aceptado": true
+  },
+  {
+    "n_caracteristicas": 9,
+    "lambda": 0.013256355304969528,
+    "seleccionadas": [
+      "total_area",
+      "ceiling_height",
+      "metro_distance_min",
+      "metro_to_center_km",
+      "metro_distance_type",
+      "building_type",
+      "renovation",
+      "district",
+      "date_posted_dt"
+    ],
+    "rmse_referencia": 1611944.0449718954,
+    "rmse_validation_original": 1604689.7774386946,
+    "mejora_pct": 0.45003221767088525,
+    "aceptado": false
+  },
+  {
+    "n_caracteristicas": 11,
+    "lambda": 0.011104552427773657,
+    "seleccionadas": [
+      "total_area",
+      "ceiling_height",
+      "metro_distance_min",
+      "metro_to_center_km",
+      "surface_corrected",
+      "has_balcony",
+      "metro_distance_type",
+      "building_type",
+      "renovation",
+      "district",
+      "date_posted_dt"
+    ],
+    "rmse_referencia": 1611944.0449718954,
+    "rmse_validation_original": 1593947.7157394462,
+    "mejora_pct": 1.1164363483077941,
+    "aceptado": true
+  },
+  {
+    "n_caracteristicas": 12,
+    "lambda": 0.005467751283199162,
+    "seleccionadas": [
+      "total_area",
+      "total_floors",
+      "ceiling_height",
+      "metro_distance_min",
+      "metro_to_center_km",
+      "surface_corrected",
+      "has_balcony",
+      "metro_distance_type",
+      "building_type",
+      "renovation",
+      "district",
+      "date_posted_dt"
+    ],
+    "rmse_referencia": 1593947.7157394462,
+    "rmse_validation_original": 1593007.2665818648,
+    "mejora_pct": 0.05900125507850483,
+    "aceptado": false
+  }
+]

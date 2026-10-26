@@ -1,0 +1,42 @@
+[
+  {
+    "fold": 1,
+    "n_fit": 6499,
+    "n_validation": 6386,
+    "fit_hasta": "2020-11-03 00:00:00",
+    "validation_desde": "2020-11-04 00:00:00",
+    "validation_hasta": "2021-09-06 00:00:00"
+  },
+  {
+    "fold": 2,
+    "n_fit": 12885,
+    "n_validation": 6347,
+    "fit_hasta": "2021-09-06 00:00:00",
+    "validation_desde": "2021-09-07 00:00:00",
+    "validation_hasta": "2022-07-10 00:00:00"
+  },
+  {
+    "fold": 3,
+    "n_fit": 19232,
+    "n_validation": 6327,
+    "fit_hasta": "2022-07-10 00:00:00",
+    "validation_desde": "2022-07-11 00:00:00",
+    "validation_hasta": "2023-05-13 00:00:00"
+  },
+  {
+    "fold": 4,
+    "n_fit": 25559,
+    "n_validation": 6267,
+    "fit_hasta": "2023-05-13 00:00:00",
+    "validation_desde": "2023-05-14 00:00:00",
+    "validation_hasta": "2024-03-15 00:00:00"
+  },
+  {
+    "fold": 5,
+    "n_fit": 31826,
+    "n_validation": 6158,
+    "fit_hasta": "2024-03-15 00:00:00",
+    "validation_desde": "2024-03-16 00:00:00",
+    "validation_hasta": "2025-01-16 00:00:00"
+  }
+]

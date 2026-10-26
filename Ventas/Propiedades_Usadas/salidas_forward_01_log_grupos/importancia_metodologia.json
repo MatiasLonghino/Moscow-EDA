@@ -1,0 +1,12 @@
+{
+  "metodo": "Permutation Importance agrupada",
+  "n_repeticiones": 5,
+  "random_state": 42,
+  "formula": "100 * (RMSE permutado - RMSE original) / RMSE original",
+  "evaluacion": "validación interna de Train utilizada en selección; descriptiva",
+  "modelo_importancia": "OLS ajustado una vez en entrenamiento interno; exp sin corrección",
+  "forward_run_id": "d43e88406b0843c5b7963d2c1e62d15a",
+  "dataset_sha256": "12fe313ce35f77af04ba22c09c4327058fe4850d1fa9a863a1755f89e2042a86",
+  "particion_sha256": "7b13731279e3bcf4c128706236c19f052c1ef337ce12277ae27f351391f4c05c",
+  "modelo_final_sha256": "36c6d30d29fc3a410781f93f99e41504753b4cd2c62393f0dc236caf788883d6"
+}

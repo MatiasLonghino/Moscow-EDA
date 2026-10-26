@@ -1,0 +1,17 @@
+{
+  "min_mejora_pct": 1.0,
+  "max_caracteristicas": 12,
+  "n_splits": 5,
+  "limite_preflight_segundos": 3600,
+  "cv": "TimeSeriesSplit por fecha completa; ventanas expansivas",
+  "criterio": "media de RMSE de validación en RUB; exp sin corrección",
+  "excluidas": [
+    "to_center_km",
+    "living_area",
+    "rooms"
+  ],
+  "dataset_sha256": "12fe313ce35f77af04ba22c09c4327058fe4850d1fa9a863a1755f89e2042a86",
+  "reference_run_id": "f68265a7164742159c9807d91fa4f8e5",
+  "resumen_transformacion_sha256": "43142a1b3526724aae29aa8c3da91050c365d41c81e7d644e4b3086ffc04abf2",
+  "limite_preflight": "Admisión antes de buscar; no agrega una regla de parada al algoritmo."
+}
