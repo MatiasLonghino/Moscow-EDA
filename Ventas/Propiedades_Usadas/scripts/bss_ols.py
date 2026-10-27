@@ -100,6 +100,80 @@ def _estadisticos(rss, tss, n, rango):
         bic_train_log=n*(np.log(2*np.pi)+1+np.log(rss/n))+np.log(n)*rango if rss > 0 and n > rango else None)
 
 
+class MotorRSS:
+    """Álgebra OLS compartida; QR/Gram se preparan una vez por entrenamiento."""
+    def __init__(self, A, z, *, fallback_statsmodels=False):
+        self.A, self.z = np.asarray(A,dtype=float), np.asarray(z,dtype=float)
+        self.n = len(z)
+        self.raw = np.column_stack([np.ones(self.n),self.A])
+        self.rango = int(np.linalg.matrix_rank(self.raw))
+        self.centro, escala = self.A.mean(axis=0), self.A.std(axis=0)
+        self.escala = np.where(escala > 0,escala,1.)
+        C, yc = (self.A-self.centro)/self.escala, self.z-self.z.mean()
+        Q,self.R = np.linalg.qr(C,mode='reduced')
+        self.qy = Q.T@yc
+        fuera = yc-Q@self.qy
+        self.rss_fuera, self.tss = float(fuera@fuera), float(yc@yc)
+        self.gram,self.xy = self.R.T@self.R,self.R.T@self.qy
+        self.fallback_statsmodels = fallback_statsmodels
+
+    def resolver(self, indices):
+        if not indices:
+            return self.tss,1,np.empty(0),float(self.z.mean()),'QR_Gram_Cholesky'
+        fallback = self.rango != self.raw.shape[1]
+        if not fallback:
+            try:
+                factor = cho_factor(self.gram[np.ix_(indices,indices)],lower=True,check_finite=False)
+                beta = cho_solve(factor,self.xy[indices],check_finite=False)
+                residuo = self.qy-self.R[:,indices]@beta
+                rss,rango = self.rss_fuera+float(residuo@residuo),len(indices)+1
+                if rss <= np.finfo(float).eps*self.n*max(self.tss,1.):
+                    fallback = True
+            except np.linalg.LinAlgError:
+                fallback = True
+        if fallback:
+            if self.fallback_statsmodels:
+                modelo = b.sm.OLS(self.z,self.raw[:,[0]+[i+1 for i in indices]],missing='raise').fit()
+                return float(modelo.ssr),int(modelo.model.rank),np.asarray(modelo.params[1:]),float(modelo.params[0]),'pinv'
+            # SVD solo de la matriz QR reducida: nunca statsmodels por combinación.
+            beta,_,rango,_ = np.linalg.lstsq(self.R[:,indices],self.qy,rcond=1e-12)
+            residuo = self.qy-self.R[:,indices]@beta
+            rss,rango = self.rss_fuera+float(residuo@residuo),int(rango)+1
+        coef = beta/self.escala[indices]
+        return float(rss),rango,coef,float(self.z.mean()-self.centro[indices]@coef),'QR_SVD' if fallback else 'QR_Gram_Cholesky'
+
+
+def buscar_rss_minimo(X, y_log, grupos, tamanos):
+    """Ruta mínima: solo tamaños solicitados, ganadores y coeficientes; sin diagnósticos/historial."""
+    assert X.index.equals(y_log.index) and np.isfinite(X.to_numpy()).all() and np.isfinite(y_log).all()
+    assert set(X)==set(s.columnas_grupos(grupos,list(grupos)))
+    assert X.shape[1]==sum(map(len,grupos.values())) and X.columns.is_unique
+    tamanos=sorted(set(tamanos))
+    assert tamanos and all(1<=k<=len(grupos) for k in tamanos)
+    posiciones={c:i for i,c in enumerate(X)}
+    ids={g:[posiciones[c] for c in cols] for g,cols in grupos.items()}
+    ganadores,evaluados,no_identificables={},0,0
+    with threadpool_limits(limits=1):
+        motor=MotorRSS(X.to_numpy(),y_log.to_numpy())
+        for k in tamanos:
+            mejor=None
+            for combinacion in itertools.combinations(grupos,k):
+                indices=[i for g in combinacion for i in ids[g]]
+                rss,rango,coef,intercepto,_=motor.resolver(indices)
+                evaluados+=1
+                if rango != len(indices)+1:
+                    no_identificables+=1
+                    continue
+                if mejor is None or rss<mejor['rss']:
+                    mejor=dict(seleccionadas=list(combinacion),columnas=[X.columns[i] for i in indices],
+                        rss=rss,coef=coef,intercepto=intercepto,rango=rango)
+            if mejor is None:
+                raise ValueError(f'No hay un subconjunto identificable de tamaño {k}; no completar con ceros ni omitir el tamaño.')
+            ganadores[k]=mejor
+    assert evaluados==sum(math.comb(len(grupos),k) for k in tamanos)
+    return ganadores,dict(evaluados=evaluados,no_identificables=no_identificables,rango_union=motor.rango)
+
+
 def buscar_bss(X, y, grupos, fit, val, *, min_mejora_pct=.5, max_features=12):
     """Enumera 2**m diseños. QR/Gram solo aceleran OLS; no transforman el dataset.
 
@@ -124,44 +198,17 @@ def buscar_bss(X, y, grupos, fit, val, *, min_mejora_pct=.5, max_features=12):
     n, m = len(fit), len(nombres)
     historial, mejores = [], []
     with threadpool_limits(limits=1):
-        raw = np.column_stack([np.ones(n), A])
-        rango_completo = int(np.linalg.matrix_rank(raw))
-        centro, escala = A.mean(axis=0), A.std(axis=0)
-        escala = np.where(escala > 0, escala, 1.)
-        C, yc = (A-centro)/escala, z-z.mean()
-        Q, R = np.linalg.qr(C, mode='reduced')
-        qy = Q.T@yc
-        residuo_fuera = yc-Q@qy
-        rss_fuera = float(residuo_fuera@residuo_fuera)
-        gram, xy = R.T@R, R.T@qy
-        tss = float(yc@yc)
+        motor = MotorRSS(A,z,fallback_statsmodels=True)
+        rango_completo,tss = motor.rango,motor.tss
         for k in range(m+1):
             mejor = None
             for combinacion in itertools.combinations(nombres, k):
                 indices = [i for g in combinacion for i in ids[g]]
-                fallback = rango_completo != raw.shape[1]
-                if not indices:
-                    rss, rango = tss, 1
-                else:
-                    if not fallback:
-                        try:
-                            factor = cho_factor(gram[np.ix_(indices, indices)], lower=True, check_finite=False)
-                            beta = cho_solve(factor, xy[indices], check_finite=False)
-                            residuo = qy-R[:, indices]@beta
-                            rss, rango = rss_fuera+float(residuo@residuo), len(indices)+1
-                            if rss <= np.finfo(float).eps*n*max(tss, 1.):
-                                # Con un ajuste casi perfecto, diferencias ínfimas de RSS
-                                # alteran mucho log(RSS) y AIC/BIC: usar OLS directo.
-                                fallback = True
-                        except np.linalg.LinAlgError:
-                            fallback = True
-                    if fallback:
-                        modelo = b.sm.OLS(z, raw[:, [0]+[i+1 for i in indices]], missing='raise').fit()
-                        rss, rango = float(modelo.ssr), int(modelo.model.rank)
+                rss,rango,_,_,solver = motor.resolver(indices)
                 fila = dict(orden=len(historial), id_subconjunto=sum(1 << nombres.index(g) for g in combinacion),
                     n_caracteristicas=k, n_predictores=len(indices), rango_efectivo=rango,
                     identificable=rango == len(indices)+1, grupos=json.dumps(list(combinacion)),
-                    rss_train_log=float(rss), solver='pinv' if fallback and indices else 'QR_Gram_Cholesky',
+                    rss_train_log=float(rss), solver=solver,
                     **_estadisticos(rss, tss, n, rango))
                 historial.append(fila)
                 if fila['identificable'] and (mejor is None or rss < mejor['rss_train_log']):

@@ -151,3 +151,23 @@ históricas e incorpora las nuevas secciones de características y BSS, con tabl
 gráficos de evolución y diez permutaciones conjuntas por grupo (semilla 42).
 La unión ya depende de selecciones realizadas con la misma validación: se
 advierte el riesgo de sesgo por selección y optimismo, y se mantiene Test reservado.
+
+`scripts/bss_temporal.py` añade únicamente tres folds temporales expansivos,
+una tabla de doce tamaños y una decisión 1-SE. Comparte `MotorRSS` de BSS,
+sin AIC, BIC, VIF, gráficos, permutaciones ni historiales de combinaciones.
+Cada fold conserva solo sus doce errores; sobre todo Train se buscan únicamente
+las combinaciones del tamaño elegido y se ajusta un solo OLS definitivo.
+
+Para evitar reutilizar imputaciones y el filtro Tukey calculados con todo Train,
+la CV parte de las 39.998 publicaciones crudas anteriores al corte temporal de
+Test, sin ese filtro global. La preparación se ajusta exclusivamente en cada
+prefijo; los bloques y el vocabulario OHE heredados permanecen fijos. El modelo
+final usa todo ese Train crudo y conserva su preparador para inferencia.
+Las diferencias con la población histórica filtrada, la selección previa de la
+unión y el carácter práctico de 1-SE con tres folds quedan en un desplegable
+cerrado. Los históricos y los CSV exportados no se modifican.
+
+El Run independiente es `BSS_07_Log_Temporal_3F_1SE_OLS`. Solo conserva configuración,
+fechas/rangos de los folds, errores, regla 1-SE, modelo y preparador definitivos,
+instrucciones de inferencia y las fuentes necesarias. La recuperación verifica
+identidad, esquema y selección sin volver a ejecutar los folds ni reajustar OLS.
