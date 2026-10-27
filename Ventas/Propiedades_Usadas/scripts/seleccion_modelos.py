@@ -387,7 +387,7 @@ def confirmacion_presentacion(resultado):
     return f"{accion} · **FINISHED** · [{run['run_name']}]({b.TRACKING_URI}/#/experiments/{run['experiment_id']}/runs/{run['run_id']})"
 
 
-def comparacion_final_presentacion(forward, lasso, backward=None, forward_177=None, lasso_177=None):
+def comparacion_final_presentacion(forward, lasso, backward=None, forward_177=None, lasso_177=None, bss=None):
     filas = []
     resultados = [('Forward Selection', forward), ('Group Lasso + OLS', lasso)]
     if backward is not None:
@@ -398,6 +398,8 @@ def comparacion_final_presentacion(forward, lasso, backward=None, forward_177=No
     if lasso_177 is not None:
         resultados[1] = ('Group Lasso + OLS — 174 predictoras', lasso)
         resultados.append(('Group Lasso + OLS — 177 predictoras', lasso_177))
+    if bss is not None:
+        resultados.append(('Best Subset Selection — unión', bss))
     for nombre, r in resultados:
         m = r['metricas']
         filas.append({'Método': nombre, 'Características': len(r['seleccion']['seleccionadas']),
@@ -439,7 +441,7 @@ def comparacion_final_presentacion(forward, lasso, backward=None, forward_177=No
     return b.tabla_markdown(pd.DataFrame(filas)), coincidencias
 
 
-def conclusion_presentacion(forward, lasso, backward=None, forward_177=None, lasso_177=None):
+def conclusion_presentacion(forward, lasso, backward=None, forward_177=None, lasso_177=None, bss=None):
     if backward is not None or forward_177 is not None or lasso_177 is not None:
         resultados = [('Forward Selection', forward), ('Group Lasso + OLS', lasso)]
         if backward is not None:
@@ -450,6 +452,8 @@ def conclusion_presentacion(forward, lasso, backward=None, forward_177=None, las
         if lasso_177 is not None:
             resultados[1] = ('Group Lasso + OLS — 174 predictoras', lasso)
             resultados.append(('Group Lasso + OLS — 177 predictoras', lasso_177))
+        if bss is not None:
+            resultados.append(('Best Subset Selection — unión', bss))
         minimo = min(r['metricas']['selection_rmse_validation_original'] for _, r in resultados)
         menor = min(len(r['seleccion']['seleccionadas']) for _, r in resultados)
         ganadores = ', '.join(n for n, r in resultados if r['metricas']['selection_rmse_validation_original'] == minimo)
@@ -466,6 +470,11 @@ def conclusion_presentacion(forward, lasso, backward=None, forward_177=None, las
         if lasso_177 is not None:
             universos = ('Forward y Group Lasso históricos parten de 174 columnas; los nuevos Forward y Group Lasso '
                          'y Backward parten de 177. ')
+        if bss is not None:
+            universos += (f"BSS parte de una unión derivada de {len(bss['grupos'])} características / "
+                f"{sum(map(len, bss['grupos'].values()))} columnas, no del mismo universo inicial. "
+                'Esta unión fue construida usando selecciones que ya consultaron la validación; '
+                'reutilizarla introduce riesgo de sesgo por selección y optimismo. ')
         return (f"{ganadores} obtuvo el menor RMSE interno ({minimo:,.0f} RUB). "
             f"El menor número de características finales corresponde a {compactos} ({menor} grupos); "
             f"la mayor reducción proporcional corresponde a {mas_reducidos}. {reducciones}. "

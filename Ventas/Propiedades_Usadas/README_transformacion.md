@@ -121,3 +121,33 @@ sin repetir FISTA ni el ajuste OLS. Los artefactos usan una carpeta independient
 `presentacion_lasso_177`; la importancia conjunta mantiene diez repeticiones con
 semilla 42. El notebook compara los tres métodos con 177 candidatas y conserva
 también los dos experimentos históricos de 174 columnas en la comparación general.
+
+`scripts/bss_ols.py` construye dinámicamente el cuadro de coincidencias y la
+unión de las selecciones de Forward, Backward y Group Lasso de 177 candidatas.
+Se verifican sus Runs reales, grupos, huella de Train e índices internos antes
+de continuar. La unión actual contiene 13 características / 146 columnas;
+incluye también las características exclusivas de un solo método.
+
+BSS enumera exhaustivamente los 8.192 subconjuntos, incluido M0 y el modelo de
+13 grupos. El ganador de cada tamaño se define por el menor RSS de entrenamiento
+interno en escala logarítmica, con desempate por el orden del linaje. Solo los
+ganadores por tamaño se evalúan en validación. El modelo definitivo se elige
+entre 1 y 12 grupos, con mejora mínima del 0,5 % frente al último aceptado,
+sin detenerse ante un rechazo intermedio, y se reajusta sobre todo Train.
+
+QR reducido y Gram/Cholesky aceleran los cálculos sin modificar las columnas
+exportadas. El RSS se obtiene por normas de residuos, evitando cancelación;
+los diseños singulares y los ajustes casi perfectos utilizan OLS directo.
+El historial comprimido registra todas las combinaciones, rangos y estadísticas;
+los ganadores se contrastan con OLS directo antes de calcular sus RMSE en RUB.
+Su artefacto canónico es `historial_combinaciones.csv.zip`: ZIP evita la
+descompresión automática de archivos `.gz` al descargarlos desde DagsHub y
+permite conservar la verificación estricta byte a byte.
+
+El Run exclusivo es `BSS_06_Log_Union_177_Grupos_OLS`. La recuperación verifica
+los tres orígenes, la unión, la partición, la exhaustividad y las decisiones,
+sin repetir la búsqueda ni el ajuste. El notebook conserva las comparaciones
+históricas e incorpora las nuevas secciones de características y BSS, con tablas,
+gráficos de evolución y diez permutaciones conjuntas por grupo (semilla 42).
+La unión ya depende de selecciones realizadas con la misma validación: se
+advierte el riesgo de sesgo por selección y optimismo, y se mantiene Test reservado.
