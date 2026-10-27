@@ -70,3 +70,39 @@ Los algoritmos, hiperparámetros, criterios de parada y conclusiones no cambian.
 Para revisar resultados históricos se descargan los artefactos del Run original;
 no se necesita repetir el entrenamiento. No ejecutar los notebooks de ajuste
 completos para verificar una reorganización de archivos.
+
+`4_Seleccion_Modelos.ipynb` incorpora Backward Selection mediante
+`scripts/backward_ols.py`. Sus exclusiones son vacías: comienza con las 177
+columnas de Train y 23 características originales, manteniendo completos los
+bloques del linaje. Conserva la partición interna 80/20 de los experimentos
+históricos (semilla 42) y utiliza `OLS_02_Log_Target` como referencia.
+La trayectoria elimina un grupo por paso hasta conservar uno; luego evalúa
+los tamaños de 1 a 12, exigiendo una mejora del RMSE interno en RUB de al menos
+0,5 % frente al último aceptado, desde el intercepto. Los diseños de rango
+deficiente se documentan y no pueden ser el OLS definitivo. Sin mejora no se
+registra un ganador. La evidencia completa, la partición, el modelo y las diez
+permutaciones conjuntas por grupo se conservan en MLflow.
+
+Backward utiliza el nombre exclusivo `Backward_03_Log_177_Grupos_OLS`.
+`modo="recuperar"` valida estrictamente universo, configuración, partición,
+trayectoria y modelo; `modo="nuevo"` exige un nombre de Run libre. Forward y
+Group Lasso mantienen sus Runs y sus 174 candidatas. La comparación de los
+tres métodos es descriptiva por sus diferentes universos; la validación
+interna participa en la selección y no evalúa datos nuevos independientes.
+
+El Forward de 177 candidatas se presenta como un experimento independiente en
+el mismo notebook: `Forward_04_Log_177_Grupos`, con referencia
+`OLS_02_Log_Target`. `cargar_forward_177(datos)` reutiliza la carga común con
+`excluidas=()` y comprueba los índices frente al experimento histórico. El
+algoritmo es el mismo `forward_grupos`: intercepto inicial, incorporaciones de
+bloques completos, mejora mínima del 0,5 % y máximo de 12 características.
+La importancia por permutación conserva cinco repeticiones y semilla 42.
+Su carpeta temporal es independiente del Forward de 174 columnas.
+
+Después del primer registro, el notebook utiliza `modo="recuperar"`, que
+comprueba también el universo de 177 candidatas, la referencia y las decisiones
+del historial. Una ejecución nueva exige un nombre libre. La comparación
+específica distingue candidatas y seleccionadas e informa si `to_center_km`,
+`living_area` y `rooms` ingresaron, y en qué iteración. La comparación final
+incluye los dos Forward, Group Lasso + OLS y Backward, conservando la advertencia
+sobre el uso de la validación interna durante la selección.

@@ -10,7 +10,9 @@ from threadpoolctl import threadpool_limits
 from . import baseline_ols as b
 EXCLUIDAS = ('to_center_km', 'living_area', 'rooms')
 NOMBRE_RUN = 'Forward_01_Log_Grupos'
+NOMBRE_RUN_177 = 'Forward_04_Log_177_Grupos'
 REFERENCIA = 'OLS_05_Log_Sin_rooms'
+REFERENCIA_177 = 'OLS_02_Log_Target'
 CONFIG_FORWARD = {'min_mejora_pct': .5, 'max_features': 12, 'random_state': 42}
 
 
@@ -42,14 +44,78 @@ def cargar_presentacion(base, sesion, *, excluidas=EXCLUIDAS, config_forward=Non
 
 
 def _parametros_presentacion(datos, metodo):
-    cfg = datos['config_forward'] if metodo == 'forward' else datos['config_lasso']
+    cfg = datos['config_forward'] if metodo in ('forward', 'backward') else datos['config_lasso']
     return {'target_transform': 'ln(Target)', 'inverse_transform': 'exp', 'bias_correction': 'none',
         'intercepto': 'True', 'cov_type': 'nonrobust', 'solver': 'pinv', 'train_fraction': '1.0',
         'n_train': len(datos['y']), 'excluded_predictors': ','.join(datos['excluidas']),
         'max_features': cfg['max_features'], 'min_mejora_pct': cfg['min_mejora_pct'],
         'validation_fraction': .2, 'random_state': datos['config_forward']['random_state'],
-        'feature_selection': 'forward_stepwise_grouped' if metodo == 'forward' else 'group_lasso_then_ols',
+        'feature_selection': {'forward': 'forward_stepwise_grouped', 'lasso': 'group_lasso_then_ols',
+                              'backward': 'backward_stepwise_grouped'}[metodo],
         'aic_bic_convention': 'statsmodels_gaussian_log_RUB_k_rank'}
+
+
+def cargar_forward_177(datos):
+    """Universo independiente; la carga común mantiene las transformaciones exportadas."""
+    completo = cargar_presentacion(datos['base'], datos['sesion'], excluidas=(), cliente=datos['cliente'])
+    assert completo['X'].shape[1] == completo['n_exportadas'] == 177
+    assert set(EXCLUIDAS) <= set(completo['X']) and completo['excluidas'] == ()
+    assert completo['contexto']['dataset_sha256'] == datos['contexto']['dataset_sha256']
+    for clave in ('fit', 'val'):
+        np.testing.assert_array_equal(completo[clave], datos[clave])
+    return completo
+
+
+def _parametros_forward_177(datos):
+    return dict(n_candidate_predictors=177, n_candidate_groups=len(datos['grupos']),
+        candidate_columns=json.dumps(list(datos['X'])), reference_run_name=REFERENCIA_177,
+        excluded_predictors='', permutation_repeats=5)
+
+
+def _validar_forward_177(datos, resultado):
+    """Audita referencia, universo y cada decisión sin repetir selección ni ajustes."""
+    p, sel = resultado['run']['params'], resultado['seleccion']
+    assert resultado['contexto']['universo_predictoras'] == list(datos['X'])
+    assert resultado['contexto']['n_predictoras_inicial'] == 177
+    ref = recuperar_experimento(datos['cliente'], nombre=REFERENCIA_177, run_id=p['reference_run_id'],
+        parametros={'n_predictors': 177, 'target_transform': 'ln(Target)',
+                    'inverse_transform': 'exp', 'bias_correction': 'none'},
+        etiquetas={'dataset_sha256': datos['contexto']['dataset_sha256']})
+    assert resultado['contexto']['reference_run_id'] == ref['run_id']
+    assert json.loads(p['feature_order']) == sel['seleccionadas']
+    assert sel['iteraciones'] == len(sel['historial'])
+    assert sel['candidatos_evaluados'] == len(sel['candidatos'])
+    elegidas, actual = [], sel['rmse_intercepto_original']
+    vistos = 0
+    for it, paso in enumerate(sel['historial'], 1):
+        candidatos = [c for c in sel['candidatos'] if c['iteracion'] == it]
+        assert [c['candidata'] for c in candidatos] == [g for g in datos['grupos'] if g not in elegidas]
+        vistos += len(candidatos)
+        mejor = min(candidatos, key=lambda c: c['rmse_validation_original']
+                    if c['rmse_validation_original'] is not None else np.inf)
+        score = mejor['rmse_validation_original']
+        mejora = 100*(actual-score)/actual if score is not None and actual > 0 else None
+        acepta = mejora is not None and mejora >= datos['config_forward']['min_mejora_pct']
+        assert paso['iteracion'] == it and paso['aceptada'] == acepta
+        assert paso['mejor_candidata'] == mejor['candidata']
+        assert paso['rmse_mejor_candidato'] == score
+        if mejora is not None:
+            np.testing.assert_allclose(paso['mejora_pct'], mejora, rtol=1e-12)
+        if acepta:
+            elegidas.append(mejor['candidata'])
+            actual = score
+        else:
+            assert it == len(sel['historial']), 'Forward debe detenerse en el primer rechazo.'
+        assert paso['caracteristica_incorporada'] == (mejor['candidata'] if acepta else None)
+        assert paso['caracteristicas_acumuladas'] == elegidas
+        assert paso['n_predictores'] == len(columnas_grupos(datos['grupos'], elegidas))
+        np.testing.assert_allclose(paso['rmse_validacion'], actual)
+    assert vistos == len(sel['candidatos']) and elegidas == sel['seleccionadas']
+    assert 0 < len(elegidas) <= datos['config_forward']['max_features']
+    np.testing.assert_allclose(actual, sel['rmse_validation_original'])
+    motivo = ('min_mejora_pct' if not sel['historial'][-1]['aceptada'] else
+              'max_features' if len(elegidas) == datos['config_forward']['max_features'] else 'candidatas_agotadas')
+    assert sel['motivo_parada'] == p['selection_stop_reason'] == motivo
 
 
 def _validar_resultado_presentacion(datos, r):
@@ -108,9 +174,18 @@ def ejecutar_presentacion(datos, metodo, *, modo='recuperar', anterior=None, nom
     """
     from . import group_lasso_ols as gl
     from statsmodels.regression.linear_model import OLSResults
-    if metodo not in ('forward', 'lasso') or modo not in ('recuperar', 'nuevo'):
-        raise ValueError('Elegir forward/lasso y recuperar/nuevo.')
-    nombre = nombre_run or (NOMBRE_RUN if metodo == 'forward' else gl.NOMBRE_RUN)
+    from . import backward_ols as bw
+    if metodo not in ('forward', 'lasso', 'backward') or modo not in ('recuperar', 'nuevo'):
+        raise ValueError('Elegir forward/lasso/backward y recuperar/nuevo.')
+    if metodo == 'backward':
+        if datos['excluidas'] or datos['X'].shape[1] != 177 or datos['config_forward'] != bw.CONFIG:
+            raise ValueError('Backward requiere 177 columnas, exclusiones vacías y configuración fija.')
+    forward_177 = metodo == 'forward' and datos['excluidas'] == ()
+    if forward_177 and (datos['X'].shape[1] != 177 or datos['config_forward'] != CONFIG_FORWARD):
+        raise ValueError('Forward 177 requiere 177 columnas y configuración fija 80/20, semilla 42, 12 grupos y 0,5 %.')
+    nombre = nombre_run or {'forward': NOMBRE_RUN, 'lasso': gl.NOMBRE_RUN, 'backward': bw.NOMBRE_RUN}[metodo]
+    if forward_177 and nombre_run is None:
+        nombre = NOMBRE_RUN_177
     if "'" in nombre or not nombre.strip():
         raise ValueError('Nombre de Run inválido.')
     if metodo == 'lasso' and (modo == 'nuevo' or anterior is not None):
@@ -118,7 +193,7 @@ def ejecutar_presentacion(datos, metodo, *, modo='recuperar', anterior=None, nom
             raise ValueError('Group Lasso requiere la referencia Forward de esta comparación.')
         _validar_resultado_presentacion(datos, anterior)
     cliente, sesion = datos['cliente'], datos['sesion']
-    out = sesion.carpeta('presentacion_'+metodo)
+    out = sesion.carpeta('presentacion_forward_177' if forward_177 else 'presentacion_'+metodo)
     if modo == 'nuevo':
         exp = cliente.get_experiment_by_name(b.EXPERIMENTO)
         if exp is None or exp.lifecycle_stage != 'active':
@@ -137,6 +212,9 @@ def ejecutar_presentacion(datos, metodo, *, modo='recuperar', anterior=None, nom
                 carpeta_salida=out, excluidas=datos['excluidas'], referencia_nombre=referencia_nombre,
                 nombre_run=nombre)
             rid = resultado['registro']['run_id']
+        elif metodo == 'backward':
+            resultado = bw.ejecutar_experimento(datos, out, nombre_run=nombre)
+            rid = resultado['registro']['run_id']
         else:
             if anterior is None:
                 raise ValueError('Group Lasso requiere la referencia Forward de esta comparación.')
@@ -153,6 +231,17 @@ def ejecutar_presentacion(datos, metodo, *, modo='recuperar', anterior=None, nom
     for k, v in _parametros_presentacion(datos, metodo).items():
         if run['params'].get(k, '' if k == 'excluded_predictors' else None) != str(v):
             raise ValueError(f'Run incompatible ({k}); ejecutar una selección nueva con otro nombre de Run.')
+    if forward_177:
+        for k, v in _parametros_forward_177(datos).items():
+            if run['params'].get(k) != str(v):
+                raise ValueError(f'Run Forward 177 incompatible ({k}).')
+    if metodo == 'backward':
+        for k, esperado in dict(algorithm_version=bw.VERSION, n_candidate_predictors='177',
+                               reference_run_name=bw.REFERENCIA, permutation_repeats='10').items():
+            if run['params'].get(k) != esperado:
+                raise ValueError(f'Run Backward incompatible ({k}).')
+        if json.loads(run['params']['candidate_columns']) != list(datos['X']):
+            raise ValueError('Universo Backward incompatible.')
     nombres = ['contexto.json', 'seleccion.json', 'metricas.json', 'grupos_caracteristicas.json',
                'particion_interna.npz', 'modelo_statsmodels.pkl', 'inferencia.json']
     for archivo in nombres:
@@ -166,6 +255,10 @@ def ejecutar_presentacion(datos, metodo, *, modo='recuperar', anterior=None, nom
              seleccion=leer('seleccion.json'), metricas=leer('metricas.json'), grupos=grupos,
              modelo=OLSResults.load(out/'modelo_statsmodels.pkl'), particion=indices)
     _validar_resultado_presentacion(datos, r)
+    if metodo == 'backward':
+        bw.validar_recuperacion(datos, r)
+    if forward_177:
+        _validar_forward_177(datos, r)
     assert leer('inferencia.json')['columnas_diseno'] == r['modelo'].model.exog_names
     if metodo == 'lasso':
         if anterior is None or run['params']['reference_run_id'] != anterior['run']['run_id']:
@@ -200,7 +293,14 @@ def ejecutar_presentacion(datos, metodo, *, modo='recuperar', anterior=None, nom
     np.testing.assert_allclose(importancia.importancia_pct,
         100*(importancia.rmse_permutado-importancia.rmse_original)/importancia.rmse_original, rtol=1e-10, atol=1e-10)
     r['importancias'] = importancia
-    r['caracteristicas_md'] = resumen_caracteristicas(r['seleccion']['seleccionadas'], grupos, r['modelo'], mostrar_orden=False)
+    r['caracteristicas_md'] = resumen_caracteristicas(r['seleccion']['seleccionadas'], grupos, r['modelo'], mostrar_orden=forward_177)
+    if metodo == 'backward' or forward_177:
+        filas = [{'Característica original': g, 'Columna transformada': c,
+                  'Coeficiente OLS [ln(RUB)]': float(r['modelo'].params[c])}
+                 for g in r['seleccion']['seleccionadas'] for c in grupos[g]]
+        r['caracteristicas_md'] += '\n\n'+b.tabla_markdown(pd.DataFrame(filas))
+    if forward_177:
+        r['etiqueta'] = 'Forward Stepwise Selection — 177 predictoras'
     if modo == 'nuevo':
         (out/'caracteristicas_seleccionadas.md').write_text(r['caracteristicas_md'], encoding='utf-8')
         registrar_presentacion(cliente, run, out, ['caracteristicas_seleccionadas.md',
@@ -227,7 +327,9 @@ def tabla_metricas_presentacion(resultado, anterior=None):
         if anterior:
             previo = anterior['metricas'].get(clave)
             fila['Forward'] = b._formato_presentacion(previo) if previo is not None else 'N/D'
-        fila['Group Lasso + OLS' if anterior else 'Forward'] = b._formato_presentacion(nuevo) if nuevo is not None else 'N/D'
+        etiqueta_modelo = resultado.get('etiqueta') or ('Backward Selection' if resultado.get('metodo') == 'backward'
+                          else 'Group Lasso + OLS' if anterior else 'Forward')
+        fila[etiqueta_modelo] = b._formato_presentacion(nuevo) if nuevo is not None else 'N/D'
         if anterior:
             fila['Δ nuevo − anterior'] = b._formato_presentacion(nuevo-previo) if nuevo is not None and previo is not None else 'N/D'
         filas.append(fila)
@@ -265,28 +367,124 @@ def confirmacion_presentacion(resultado):
     return f"{accion} · **FINISHED** · [{run['run_name']}]({b.TRACKING_URI}/#/experiments/{run['experiment_id']}/runs/{run['run_id']})"
 
 
-def comparacion_final_presentacion(forward, lasso):
+def comparacion_final_presentacion(forward, lasso, backward=None, forward_177=None):
     filas = []
-    for nombre, r in [('Forward Selection', forward), ('Group Lasso + OLS', lasso)]:
+    resultados = [('Forward Selection', forward), ('Group Lasso + OLS', lasso)]
+    if backward is not None:
+        resultados.append(('Backward Selection', backward))
+    if forward_177 is not None:
+        resultados[0] = ('Forward Selection — 174 predictoras', forward)
+        resultados.append(('Forward Selection — 177 predictoras', forward_177))
+    for nombre, r in resultados:
         m = r['metricas']
         filas.append({'Método': nombre, 'Características': len(r['seleccion']['seleccionadas']),
             'Columnas OLS': int(m['train_n_predictors']), 'R² ajustado Train [log]': f"{m['train_r2_adj_log']:.6f}",
             **{etiqueta: b._formato_presentacion(m[k]) for k, etiqueta in [
                 ('train_rmse_original', 'RMSE Train (RUB)'), ('selection_rmse_validation_original', 'RMSE interno (RUB)'),
                 ('train_aic_log', 'AIC [log]'), ('train_bic_log', 'BIC [log]')]}})
+        if forward_177 is not None:
+            filas[-1].update({'Columnas candidatas': sum(map(len, r['grupos'].values())),
+                              'Grupos candidatos': len(r['grupos'])})
     a, bgr = set(forward['seleccion']['seleccionadas']), set(lasso['seleccion']['seleccionadas'])
     lista = lambda conjunto: ', '.join(f'`{g}`' for g in sorted(conjunto)) or 'Ninguna'
     coincidencias = f"Coinciden: {lista(a & bgr)}.  \nExclusivas de Forward: {lista(a-bgr)}.  \nExclusivas de Group Lasso: {lista(bgr-a)}."
+    if backward is not None:
+        conjuntos = {nombre: set(r['seleccion']['seleccionadas']) for nombre, r in resultados}
+        comunes = set.intersection(*conjuntos.values())
+        partes = [f'Comunes a los tres: {lista(comunes)}.']
+        for nombre, conjunto in conjuntos.items():
+            otros = set.union(*(v for k, v in conjuntos.items() if k != nombre))
+            partes.append(f'Exclusivas de {nombre}: {lista(conjunto-otros)}.')
+        for i, (nombre, conjunto) in enumerate(conjuntos.items()):
+            for otro, segundo in list(conjuntos.items())[i+1:]:
+                partes.append(f'Compartidas solo por {nombre} y {otro}: {lista((conjunto & segundo)-comunes)}.')
+        coincidencias = '  \n'.join(partes)
+    if forward_177 is not None:
+        conjuntos = {nombre: set(r['seleccion']['seleccionadas']) for nombre, r in resultados}
+        firmas = {}
+        for g in sorted(set.union(*conjuntos.values())):
+            firma = tuple(nombre for nombre, conjunto in conjuntos.items() if g in conjunto)
+            firmas.setdefault(firma, set()).add(g)
+        todos = tuple(conjuntos)
+        partes = [f"Comunes a los {len(resultados)}: {lista(firmas.get(todos, set()))}."]
+        for nombre in conjuntos:
+            partes.append(f"Exclusivas de {nombre}: {lista(firmas.get((nombre,), set()))}.")
+        for firma, nombres in firmas.items():
+            if 1 < len(firma) < len(resultados):
+                partes.append(f"Compartidas solo por {' y '.join(firma)}: {lista(nombres)}.")
+        coincidencias = '  \n'.join(partes)
     return b.tabla_markdown(pd.DataFrame(filas)), coincidencias
 
 
-def conclusion_presentacion(forward, lasso):
+def conclusion_presentacion(forward, lasso, backward=None, forward_177=None):
+    if backward is not None or forward_177 is not None:
+        resultados = [('Forward Selection', forward), ('Group Lasso + OLS', lasso)]
+        if backward is not None:
+            resultados.append(('Backward Selection', backward))
+        if forward_177 is not None:
+            resultados[0] = ('Forward Selection — 174 predictoras', forward)
+            resultados.append(('Forward Selection — 177 predictoras', forward_177))
+        minimo = min(r['metricas']['selection_rmse_validation_original'] for _, r in resultados)
+        menor = min(len(r['seleccion']['seleccionadas']) for _, r in resultados)
+        ganadores = ', '.join(n for n, r in resultados if r['metricas']['selection_rmse_validation_original'] == minimo)
+        compactos = ', '.join(n for n, r in resultados if len(r['seleccion']['seleccionadas']) == menor)
+        reducciones = '; '.join(f"{n}: {len(r['grupos'])} → {len(r['seleccion']['seleccionadas'])} grupos "
+            f"({100*(1-len(r['seleccion']['seleccionadas'])/len(r['grupos'])):.1f} % de reducción), "
+            f"{int(r['metricas']['train_n_predictors'])} columnas finales" for n, r in resultados)
+        mayor = max(1-len(r['seleccion']['seleccionadas'])/len(r['grupos']) for _, r in resultados)
+        mas_reducidos = ', '.join(n for n, r in resultados
+            if np.isclose(1-len(r['seleccion']['seleccionadas'])/len(r['grupos']), mayor))
+        universos = ('Forward histórico y Group Lasso parten de 174 columnas; Forward 177 y Backward, de 177. '
+                     if forward_177 is not None else
+                     'Forward y Group Lasso parten de 174 columnas; Backward parte de 177. ')
+        return (f"{ganadores} obtuvo el menor RMSE interno ({minimo:,.0f} RUB). "
+            f"El menor número de características finales corresponde a {compactos} ({menor} grupos); "
+            f"la mayor reducción proporcional corresponde a {mas_reducidos}. {reducciones}. "
+            "Menos grupos favorecen la interpretación, aunque los bloques OHE pueden conservar muchas columnas.  \n"
+            + universos + "La comparación es descriptiva: "
+            "las diferencias no pueden atribuirse exclusivamente al algoritmo. AIC, BIC y R² ajustado "
+            "corresponden al objetivo logarítmico sobre las mismas filas de Train.  \n"
+            "La validación interna participa en la selección y no constituye una evaluación independiente "
+            "sobre datos nuevos. Test no se utilizó.")
     f, g = forward['metricas'], lasso['metricas']
     ganador = 'Group Lasso + OLS' if g['selection_rmse_validation_original'] < f['selection_rmse_validation_original'] else 'Forward Selection'
     compacto = 'Forward Selection' if len(forward['seleccion']['seleccionadas']) < len(lasso['seleccion']['seleccionadas']) else 'Group Lasso + OLS'
     return (f"{ganador} obtuvo el menor RMSE en la validación interna compartida; {compacto} logró la mayor reducción de características.  \n"
             "AIC y BIC son comparables porque ambos OLS ajustan ln(price_rub) sobre las mismas filas con la misma convención.  \n"
             "La comparación reutiliza la validación empleada en la selección; no prueba superioridad fuera de muestra ni define el modelo final. Test no se utilizó.")
+
+
+def comparacion_forward_presentacion(historico, nuevo):
+    """Mismo algoritmo y partición; distingue el universo habilitado del modelo final."""
+    tabla, _ = comparacion_final_presentacion(historico, nuevo)
+    tabla = tabla.replace('Forward Selection', 'Forward Stepwise Selection — 174 predictoras').replace(
+        'Group Lasso + OLS', 'Forward Stepwise Selection — 177 predictoras')
+    a, n = set(historico['seleccion']['seleccionadas']), set(nuevo['seleccion']['seleccionadas'])
+    lista = lambda valores: ', '.join(f'`{g}`' for g in sorted(valores)) or 'Ninguna'
+    lineas = [f"Universos iniciales: 174 columnas / {len(historico['grupos'])} grupos frente a "
+        f"177 columnas / {len(nuevo['grupos'])} grupos. La tabla cuenta las características y columnas finales.",
+        f"Comunes: {lista(a & n)}. Exclusivas del histórico: {lista(a-n)}. Exclusivas del nuevo: {lista(n-a)}."]
+    for variable in EXCLUIDAS:
+        paso = next((p['iteracion'] for p in nuevo['seleccion']['historial']
+                     if p['caracteristica_incorporada'] == variable), None)
+        lineas.append(f"`{variable}`: " + (f"incorporada en la iteración {paso}." if paso else
+                                          "disponible entre las candidatas, no seleccionada."))
+    previo = historico['metricas']['selection_rmse_validation_original']
+    actual = nuevo['metricas']['selection_rmse_validation_original']
+    diferencias = [len(n)-len(a),
+        nuevo['metricas']['train_n_predictors']-historico['metricas']['train_n_predictors']]
+    diferencias += [nuevo['metricas'][k]-historico['metricas'][k] for k in
+        ('train_r2_adj_log', 'train_rmse_original', 'selection_rmse_validation_original',
+         'train_aic_log', 'train_bic_log')]
+    tabla += '\n| Δ 177 − 174 | ' + ' | '.join(b._formato_presentacion(v) for v in diferencias) + ' |'
+    delta, pct = actual-previo, 100*(actual/previo-1)
+    lineas.append(f"Cambio del RMSE interno: {delta:+,.3f} RUB ({pct:+.3f} %). "
+        + ('Habilitar las tres variables reduce el error observado de selección. ' if delta < -1e-6 else
+           'Habilitar las tres variables aumenta el error observado de selección. ' if delta > 1e-6 else
+           'Habilitar las tres variables no modifica el error observado de selección. ')
+        + ('El conjunto seleccionado cambia.' if a != n else 'El conjunto seleccionado se mantiene.'))
+    lineas.append('La validación interna se utilizó para seleccionar los modelos; no es una evaluación independiente sobre datos nuevos. Test no se utilizó.')
+    return tabla, '  \n'.join(lineas)
 
 
 def recuperar_experimento(cliente, *, nombre=None, run_id=None,
@@ -496,11 +694,22 @@ def ejecutar_experimento(base, cliente, *, reference_run_id=None,
         'excluidas': excluidas, 'referencia_nombre': referencia_nombre}
     X, y, contexto, ref, grupos, out = preparar_experimento(base, cliente,
         reference_run_id=reference_run_id, carpeta_salida=carpeta_salida, **opciones)
+    forward_177 = tuple(excluidas) == ()
+    if forward_177:
+        if X.shape[1] != 177 or referencia_nombre != REFERENCIA_177:
+            raise ValueError('Forward sin exclusiones requiere 177 columnas y referencia OLS_02_Log_Target.')
+        if nombre_run == NOMBRE_RUN:
+            raise ValueError('El Forward de 177 requiere un nombre de Run independiente del histórico.')
+        if cliente.search_runs([ref['experiment_id']],
+                filter_string=f"tags.mlflow.runName = '{nombre_run}'", max_results=1):
+            raise ValueError('El Run ya existe; utilizar un nombre de Run nuevo.')
     y_log = np.log(y).rename('ln_price_rub')
     fit, val = train_test_split(np.arange(len(y)), test_size=0.2, random_state=random_state)
     np.savez_compressed(out/'particion_interna.npz', fit=fit, validation=val)
     seleccion = forward_grupos(X, y_log, y, grupos, fit, val,
                                min_mejora_pct=min_mejora_pct, max_features=max_features)
+    if forward_177 and not seleccion['seleccionadas']:
+        raise RuntimeError('Ninguna incorporación supera la mejora mínima; no registrar un ganador arbitrario.')
     columnas = columnas_grupos(grupos, seleccion['seleccionadas'])
     modelo, diseno = b.ajustar(X[columnas], y_log)
     assert modelo.model.rank == diseno.shape[1], 'Diseño final no identificable; no registrar.'
@@ -513,6 +722,8 @@ def ejecutar_experimento(base, cliente, *, reference_run_id=None,
                     selection_candidates_evaluated=float(seleccion['candidatos_evaluados']))
     contexto.update(predictoras=columnas, n_predictoras=len(columnas),
                     caracteristicas_originales=seleccion['seleccionadas'])
+    if forward_177:
+        contexto.update(universo_predictoras=list(X), n_predictoras_inicial=177)
     b.exportar(base, modelo, diseno, y_log, contexto, metricas, invalidas, vif, notas,
                nombre_run=nombre_run, carpeta_salida=out)
     tabla = tabla_comparativa(ref['metrics'], metricas, invalidas,
@@ -530,6 +741,9 @@ def ejecutar_experimento(base, cliente, *, reference_run_id=None,
         'feature_order': json.dumps(seleccion['seleccionadas']),
         'reference_run_name': referencia_nombre, 'reference_run_id': ref['run_id'],
         'experiment_id': ref['experiment_id'], 'notebook': '4_Seleccion_Modelos.ipynb'}
+    if forward_177:
+        parametros.update(_parametros_forward_177({'X': X, 'grupos': grupos}))
+        b.guardar_json(out/'candidatos_evaluados.json', seleccion['candidatos'])
     b.guardar_json(out/'configuracion.json', parametros)
     # Evita elegir arbitrariamente el primero de varios Runs en el registrador histórico.
     existentes = cliente.search_runs([ref['experiment_id']],
