@@ -30,6 +30,259 @@ EXPERIMENTO = "Modelos Propiedades_Usadas"
 RUN = "Baseline_OLS_01"
 TRACKING_URI = "https://dagshub.com/matiasgastonlonghino/MOSCOW_IDA.mlflow"
 
+# Una sola definición mantiene sincronizados diseño, presentación y registro.
+MODELOS_PRESENTACION = (
+    ("Baseline_OLS_01", ()),
+    ("OLS_02_Log_Target", ()),
+    ("OLS_03_Log_Sin_to_center_km", ("to_center_km",)),
+    ("OLS_04_Log_Sin_living_area", ("to_center_km", "living_area")),
+    ("OLS_05_Log_Sin_rooms", ("to_center_km", "living_area", "rooms")),
+)
+
+
+def evolucion_variables(X):
+    filas = [{"Experimento": f"{i} — {nombre}",
+              "Objetivo": "price_rub" if i == 1 else "ln(price_rub)",
+              "Predictoras": len(X.columns.difference(excluidas)),
+              "Variables eliminadas acumuladas": ", ".join(excluidas) or "Ninguna"}
+             for i, (nombre, excluidas) in enumerate(MODELOS_PRESENTACION, 1)]
+    return tabla_markdown(pd.DataFrame(filas), decimales=0)
+
+
+def ajustar_presentacion(X, y, contexto, numero, anterior=None):
+    """Ajusta y diagnostica Train; ninguna conexión ni figura durante el ajuste."""
+    if numero not in range(1, 6):
+        raise ValueError("Número de experimento fuera de 1–5.")
+    nombre, excluidas = MODELOS_PRESENTACION[numero-1]
+    reducido = X.drop(columns=list(excluidas))
+    if numero > 1:
+        assert anterior is not None and anterior["numero"] == numero-1
+        assert anterior["contexto"]["dataset_sha256"] == contexto["dataset_sha256"]
+        assert reducido.index.equals(anterior["diseno"].index)
+        esperadas = anterior["contexto"]["predictoras"].copy()
+        if numero >= 3:
+            esperadas.remove(excluidas[-1])
+        assert list(reducido) == esperadas
+    objetivo = y if numero == 1 else np.log(y).rename("ln_price_rub")
+    modelo, diseno = ajustar(reducido, objetivo)
+    metricas, invalidas, vif, notas = diagnosticar(
+        modelo, diseno, objetivo, y_original=None if numero == 1 else y,
+        resumir_vif=numero >= 3)
+    ctx = copy.deepcopy(contexto)
+    ctx.update(predictoras=list(reducido), n_predictoras=reducido.shape[1])
+    if numero > 1:
+        ctx.update(transformacion_objetivo="ln", unidad="ln(RUB)",
+                   transformacion_inversa="exp", correccion_sesgo="ninguna")
+    if excluidas:
+        ctx["predictoras_excluidas"] = list(excluidas)
+    relacion = float(X.living_area.corr(X.total_area)) if numero == 4 else None
+    return dict(numero=numero, nombre=nombre, modelo=modelo, diseno=diseno, y=objetivo,
+                precio=y, contexto=ctx, metricas=metricas, invalidas=invalidas,
+                vif=vif, notas=notas, correlacion_superficies=relacion, anterior=anterior)
+
+
+def _clave_presentacion(resultado, clave):
+    if clave in ("mae", "rmse"):
+        return "train_"+clave+("_original" if resultado["numero"] > 1 else "")
+    if clave in ("vif_max", "condition_number"):
+        return "train_"+clave
+    return "train_"+clave+("_log" if resultado["numero"] > 1 else "")
+
+
+def _valor_presentacion(resultado, clave):
+    nombre = _clave_presentacion(resultado, clave)
+    if nombre in resultado["metricas"]:
+        return resultado["metricas"][nombre]
+    razon = resultado["invalidas"].get(nombre, "No calculado")
+    return "∞" if razon.startswith("Infinito") else "No calculado"
+
+
+def _formato_presentacion(valor):
+    if isinstance(valor, str):
+        return valor
+    if valor == 0:
+        return "0"
+    if abs(valor) < .001:
+        return f"{valor:.3e}"
+    return f"{valor:,.6f}" if abs(valor) < 1 else f"{valor:,.3f}"
+
+
+def tabla_presentacion(resultado):
+    """Delta solo para estadísticas con igual respuesta y escala."""
+    previo = resultado["anterior"]
+    cruzada = resultado["numero"] == 2
+    filas = []
+    for clave, etiqueta in [("r2", "R²"), ("r2_adj", "R² ajustado"),
+                            ("mae", "MAE (RUB)"), ("rmse", "RMSE (RUB)"),
+                            ("aic", "AIC"), ("bic", "BIC"),
+                            ("vif_max", "VIF máximo"), ("condition_number", "Número de condición"),
+                            ("bp_lm_pvalue", "Breusch–Pagan (p)"),
+                            ("jarque_bera_pvalue", "Jarque–Bera (p)")]:
+        comparable = not (cruzada and clave not in ("mae", "rmse", "vif_max", "condition_number"))
+        nuevo = _valor_presentacion(resultado, clave)
+        fila = {"Métrica": etiqueta}
+        if clave in ("r2", "r2_adj", "aic", "bic", "bp_lm_pvalue", "jarque_bera_pvalue"):
+            fila["Métrica"] += " [RUB → ln(RUB)]" if cruzada else (
+                " [ln(RUB)]" if resultado["numero"] > 1 else " [RUB]")
+        if previo:
+            anterior = _valor_presentacion(previo, clave)
+            fila[previo["nombre"]] = _formato_presentacion(anterior)
+        fila[resultado["nombre"]] = _formato_presentacion(nuevo)
+        if previo:
+            fila["Δ nuevo − anterior"] = (_formato_presentacion(nuevo-anterior)
+                if comparable and not isinstance(nuevo, str) and not isinstance(anterior, str)
+                else "No comparable" if not comparable else "—")
+        filas.append(fila)
+    texto = tabla_markdown(pd.DataFrame(filas), decimales=6)
+    if cruzada:
+        texto += "\n\nR², R² ajustado, AIC, BIC y pruebas de residuos describen respuestas en escalas distintas; no se comparan entre estos dos ajustes."
+    return texto
+
+
+def grafico_presentacion(resultado):
+    """Una sola figura principal para 1/2. Las ablaciones no generan figuras."""
+    from matplotlib.figure import Figure
+    if resultado["numero"] not in (1, 2):
+        raise ValueError("Los experimentos 3–5 no tienen visualizaciones.")
+    fig = Figure(figsize=(8, 4.3), layout="constrained")
+    ax = fig.subplots()
+    if resultado["numero"] == 1:
+        precio = np.asarray(resultado["precio"])
+        pred = np.asarray(resultado["modelo"].predict(resultado["diseno"]))
+        ax.scatter(precio/1e6, pred/1e6, s=4, alpha=.22, rasterized=True)
+        limites = (min(precio.min(), pred.min())/1e6, max(precio.max(), pred.max())/1e6)
+        ax.plot(limites, limites, "--", color="black", linewidth=1, label="Predicción = precio")
+        ax.set(xlabel="Precio observado (millones de RUB)", ylabel="Precio ajustado (millones de RUB)",
+               title="Baseline_OLS_01 · ajuste sobre Train")
+    else:
+        for r in (resultado["anterior"], resultado):
+            pred = np.asarray(r["modelo"].predict(r["diseno"]))
+            if r["numero"] > 1:
+                pred = np.exp(pred)
+            error = np.sort(np.abs(np.asarray(r["precio"])-pred))
+            ax.plot(error, np.arange(1, len(error)+1)/len(error), label=r["nombre"])
+        ax.set(xscale="symlog", xlabel="Error absoluto (RUB; eje symlog)",
+               ylabel="Proporción acumulada de observaciones",
+               title="Errores de Train en la misma escala · exp sin corrección de sesgo")
+    ax.legend(fontsize=8)
+    ax.grid(alpha=.2)
+    return fig
+
+
+def interpretacion_presentacion(resultado):
+    m = resultado["metricas"]
+    if resultado["numero"] == 1:
+        return (f"El ajuste en Train alcanza R²={m['train_r2']:.4f}, con MAE={m['train_mae']:,.0f} RUB y RMSE={m['train_rmse']:,.0f} RUB.  \n"
+                f"VIF máximo={m['train_vif_max']:.2f} y número de condición={m['train_condition_number']:.1f}: hay colinealidad y sensibilidad numérica.  \n"
+                f"Breusch–Pagan (p={m['train_bp_lm_pvalue']:.2e}) y Jarque–Bera (p={m['train_jarque_bera_pvalue']:.2e}) señalan límites de homocedasticidad y normalidad.  \n"
+                "El próximo experimento evalúa ln(price_rub). Estas métricas de Train no establecen capacidad predictiva fuera de muestra.")
+    p = resultado["anterior"]["metricas"]
+    anterior = resultado["anterior"]
+    d_mae = 100*(m["train_mae_original"]/_valor_presentacion(anterior, "mae")-1)
+    d_rmse = 100*(m["train_rmse_original"]/_valor_presentacion(anterior, "rmse")-1)
+    errores = f"En Train, MAE cambia {d_mae:+.5f} % y RMSE {d_rmse:+.5f} % en RUB frente al modelo anterior."
+    if resultado["numero"] == 2:
+        return (errores+"  \nLa transformación del objetivo cambia el peso relativo de los errores; VIF y condicionamiento permanecen iguales porque X no cambia.  \n"
+                f"Persisten heterocedasticidad y desviaciones de normalidad (BP p={m['train_bp_lm_pvalue_log']:.2e}; JB p={m['train_jarque_bera_pvalue_log']:.2e}).  \n"
+                "exp(E[ln(precio)|X]) no equivale a E[precio|X]; la inversa sin corrección puede subestimar el precio esperado.  \n"
+                "Se examina a continuación to_center_km para reducir colinealidad. AIC, BIC y R² nativos no se comparan con la baseline en RUB.")
+    d_aic = m["train_aic_log"]-p["train_aic_log"]
+    d_bic = m["train_bic_log"]-p["train_bic_log"]
+    partes = [errores,
+              f"VIF máximo: {p['train_vif_max']:.2f} → {m['train_vif_max']:.2f}; número de condición: {p['train_condition_number']:.1f} → {m['train_condition_number']:.1f}.",
+              f"ΔR² ajustado log={m['train_r2_adj_log']-p['train_r2_adj_log']:+.7f}; ΔAIC={d_aic:+.3f}; ΔBIC={d_bic:+.3f} (menor AIC/BIC es preferible)."]
+    if resultado["numero"] == 3:
+        partes.append("Quitar to_center_km reduce la colinealidad, con deterioro del ajuste y del error de Train; la siguiente etapa examina redundancia entre superficies.")
+    elif resultado["numero"] == 4:
+        partes.append(f"living_area y total_area presentan correlación {resultado['correlacion_superficies']:.4f}; la exclusión reduce colinealidad, con cambios mínimos de error. Se evalúa luego rooms.")
+    else:
+        partes.append("Quitar rooms simplifica el diseño, pero empeora el ajuste y los errores de Train; la reducción adicional del VIF máximo y del número de condición es mínima.")
+    partes.append("La comparación usa las mismas filas; no demuestra equivalencia ni superioridad fuera de muestra.")
+    return "  \n".join(partes)
+
+
+def resumen_presentacion(resultados):
+    filas = []
+    for r in resultados:
+        log = r["numero"] > 1
+        filas.append({"Experimento": r["nombre"], "Eliminadas (acumuladas)":
+            ", ".join(r["contexto"].get("predictoras_excluidas", [])) or "Ninguna",
+            "p": r["contexto"]["n_predictoras"], "Escala del ajuste": "ln(RUB)" if log else "RUB",
+            **{etiqueta: _formato_presentacion(_valor_presentacion(r, clave)) for clave, etiqueta in
+               [("r2_adj", "R² ajustado¹"), ("aic", "AIC¹"), ("bic", "BIC¹"),
+                ("mae", "MAE (RUB)"), ("rmse", "RMSE (RUB)"),
+                ("vif_max", "VIF máx."), ("condition_number", "Condición")]}})
+    return tabla_markdown(pd.DataFrame(filas), decimales=6)+(
+        "\n\n¹ Comparar R² ajustado, AIC y BIC únicamente entre los experimentos 2–5, con la misma respuesta logarítmica. Todos los errores son de Train en RUB.")
+
+
+def registrar_presentacion(resultado, sesion, cliente=None):
+    """Reutiliza Runs históricos sin sobrescribir artefactos; exporta solo si falta el Run.
+
+    El modelo se ajusta en la celda académica. Aquí se verifican el contrato, las
+    métricas recalculadas y las predicciones del modelo recuperado de MLflow.
+    Las métricas adicionales históricas (p. ej. HC3) permanecen en su Run original.
+    """
+    from .contrato_datasets import RAIZ, CARPETA_PROYECTO
+    cliente = conectar(RAIZ) if cliente is None else cliente
+    ctx = resultado["contexto"]
+    anterior = resultado["anterior"]
+    if anterior:
+        clave = "baseline_run_id" if resultado["numero"] == 2 else "reference_run_id"
+        ctx[clave] = anterior["registro"]["run_id"]
+    exp = cliente.get_experiment_by_name(EXPERIMENTO)
+    if exp is None or exp.lifecycle_stage != "active":
+        raise ValueError("Debe existir el experimento activo de propiedades usadas.")
+    candidatos = cliente.search_runs([exp.experiment_id],
+        filter_string=f"tags.mlflow.runName = '{resultado['nombre']}'", max_results=100)
+    propios = [r for r in candidatos if r.info.status == "FINISHED"
+               and r.data.tags.get("dataset_sha256") == ctx["dataset_sha256"]]
+    out = sesion.carpeta(resultado["nombre"])
+    if propios:
+        run = propios[0]
+        rid = run.info.run_id
+        def descargar(nombre):
+            return Path(cliente.download_artifacts(rid, nombre, str(out)))
+        contrato = json.loads(descargar("contexto.json").read_text(encoding="utf-8"))
+        for clave in ("dataset_sha256", "predictoras", "transformacion_objetivo", "n_train"):
+            assert contrato[clave] == ctx[clave], clave
+        assert run.data.params["intercepto"].lower() == "true"
+        assert run.data.params["n_predictors"] == str(ctx["n_predictoras"])
+        assert run.data.params["train_fraction"] == "1.0"
+        for clave in ("baseline_run_id", "reference_run_id"):
+            if clave in ctx:
+                assert run.data.params[clave] == ctx[clave]
+        if resultado["numero"] > 1:
+            assert run.data.params["target_transform"] == "ln(Target)"
+            assert run.data.params["inverse_transform"] == "exp"
+            assert run.data.params["bias_correction"] == "none"
+        historicas = json.loads(descargar("metricas.json").read_text(encoding="utf-8"))
+        for k, v in resultado["metricas"].items():
+            np.testing.assert_allclose([run.data.metrics[k], historicas[k]], v, rtol=1e-10, atol=1e-12)
+        inferencia = json.loads(descargar("inferencia.json").read_text(encoding="utf-8"))
+        assert inferencia["columnas_diseno"] == list(resultado["diseno"])
+        recuperado = OLSResults.load(descargar("modelo_statsmodels.pkl"))
+        with threadpool_limits(limits=1):
+            np.testing.assert_allclose(recuperado.predict(resultado["diseno"]),
+                resultado["modelo"].predict(resultado["diseno"]), rtol=1e-10, atol=1e-8)
+        despues = cliente.get_run(rid)
+        assert despues.data.metrics == run.data.metrics and despues.data.params == run.data.params
+        assert despues.info.status == "FINISHED"
+        registro = dict(run_id=rid, experiment_id=exp.experiment_id, run_name=resultado["nombre"],
+            status="FINISHED", url=f"{TRACKING_URI}/#/experiments/{exp.experiment_id}/runs/{rid}")
+    else:
+        exportar(CARPETA_PROYECTO, resultado["modelo"], resultado["diseno"], resultado["y"], ctx,
+                 resultado["metricas"], resultado["invalidas"], resultado["vif"], resultado["notas"],
+                 nombre_run=resultado["nombre"], carpeta_salida=out,
+                 generar_graficos=resultado["numero"] <= 2)
+        (out/"comparacion_compacta.md").write_text(tabla_presentacion(resultado), encoding="utf-8")
+        (out/"interpretacion.md").write_text(interpretacion_presentacion(resultado), encoding="utf-8")
+        registro = registrar(cliente, out, ctx, resultado["metricas"], nombre_run=resultado["nombre"],
+                             requiere_graficos=resultado["numero"] <= 2)
+    assert sha256(CARPETA_PROYECTO/ctx["csv"]) == ctx["dataset_sha256"]
+    resultado["registro"] = registro
+    return cliente, f"**FINISHED** · [{resultado['nombre']} en DagsHub]({registro['url']})"
+
 def sha256(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
@@ -351,7 +604,7 @@ def tabla_resultados(metricas, invalidas, notas, *, nombre_run=RUN,
     return tabla_markdown(pd.DataFrame(filas),decimales=10)
 
 def exportar(base, modelo, diseno, y, contexto, metricas, invalidas, vif, notas,
-             *, nombre_run=RUN, carpeta_salida=None):
+             *, nombre_run=RUN, carpeta_salida=None, generar_graficos=True):
     import mlflow.statsmodels
     if carpeta_salida is None:
         raise ValueError("Usar exportar dentro de una SesionTemporal y especificar carpeta_salida.")
@@ -395,8 +648,9 @@ def exportar(base, modelo, diseno, y, contexto, metricas, invalidas, vif, notas,
         shutil.copytree(temporal,carpeta_modelo,dirs_exist_ok=True)
     verificado=mlflow.statsmodels.load_model(str(carpeta_modelo))
     np.testing.assert_allclose(verificado.predict(diseno.iloc[:10]),modelo.predict(diseno.iloc[:10]),rtol=1e-12)
-    generar_diagnosticos_residuales(modelo, diseno, y, nombre_run=nombre_run,
-        carpeta=out/"diagnosticos_residuales", unidad_objetivo=contexto["unidad"])
+    if generar_graficos:
+        generar_diagnosticos_residuales(modelo, diseno, y, nombre_run=nombre_run,
+            carpeta=out/"diagnosticos_residuales", unidad_objetivo=contexto["unidad"])
     assert sha256(Path(base)/contexto["csv"])==contexto["dataset_sha256"]
     return out
 
@@ -415,9 +669,11 @@ def conectar(raiz):
     cliente.search_experiments(max_results=1)
     return cliente
 
-def registrar(cliente,out,contexto,metricas, *, nombre_run=RUN, run_id=None, parametros_extra=None):
-    for nombre in ARCHIVOS:
-        assert (Path(out)/"diagnosticos_residuales"/nombre).is_file(), "Generar diagnósticos de Train antes de registrar."
+def registrar(cliente,out,contexto,metricas, *, nombre_run=RUN, run_id=None, parametros_extra=None,
+              requiere_graficos=True):
+    if requiere_graficos:
+        for nombre in ARCHIVOS:
+            assert (Path(out)/"diagnosticos_residuales"/nombre).is_file(), "Generar diagnósticos de Train antes de registrar."
     exp=cliente.get_experiment_by_name(EXPERIMENTO)
     if exp is None or exp.lifecycle_stage != "active":
         raise ValueError("Debe existir el experimento activo; no se crean nuevos experimentos.")

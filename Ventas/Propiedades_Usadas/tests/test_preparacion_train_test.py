@@ -3,6 +3,7 @@ import sys
 import tempfile
 import unittest
 import warnings
+from unittest.mock import patch
 from pathlib import Path
 import joblib
 import numpy as np
@@ -64,6 +65,46 @@ def ajustar_ejemplo(datos):
 
 
 class PreparacionTrainTest(unittest.TestCase):
+    def test_exportacion_no_vuelve_a_transformar_datos_finales(self):
+        train, test, crudo, futuro, objetos = self.preparar_entrega()
+        with tempfile.TemporaryDirectory() as carpeta, tempfile.TemporaryDirectory() as reproducibilidad:
+            with patch.object(pt, "aplicar_flujo", side_effect=AssertionError("No repetir transformaciones")):
+                m = pt.exportar_entrega_final(train, test, crudo, futuro, objetos,
+                    {"version_flujo": 3}, carpeta, carpeta_artefactos=reproducibilidad)
+            self.assertTrue(m["exportacion_desde_dataframes_finales"])
+            self.assertTrue(m["parametros_recuperados_sin_cambios"])
+            for nombre, esperado in [("train", train), ("test", test)]:
+                actual = pd.read_csv(Path(carpeta) / f"{nombre}_transformado.csv", dtype={"id": "string"},
+                                     parse_dates=["date_posted_dt"], float_precision="round_trip")
+                pd.testing.assert_frame_equal(actual, esperado.reset_index(drop=True), check_dtype=False)
+
+    def test_compatibilidad_exportacion_con_lector_ols_real(self):
+        from scripts import baseline_ols as b, contrato_datasets as cd
+        train, test, crudo, futuro, objetos = self.preparar_entrega()
+        with tempfile.TemporaryDirectory() as carpeta, tempfile.TemporaryDirectory() as reproducibilidad:
+            data = Path(carpeta) / "data"
+            m = pt.exportar_entrega_final(train, test, crudo, futuro, objetos,
+                {"version_flujo": 3}, data, carpeta_artefactos=reproducibilidad)
+            contrato = {"train": m["train"], "test": m["test"], "columnas_X": m["columnas_X"],
+                        "manifiesto_sha256": "referencia de prueba"}
+            with patch.object(cd, "CONTRATO", contrato), patch.object(b, "CONTRATO", contrato):
+                tabla = pt.validar_entrega_para_ols(train, test, data)
+                self.assertEqual(tabla.Estado.tolist(), ["Correcto", "Correcto"])
+                self.assertEqual(tabla.attrs["errores"], [])
+                # Una exportación que se haya saltado el escalado no coincide con el acumulado.
+                incorrecto = train.copy()
+                incorrecto["building_year"] += 1
+                tabla = pt.validar_entrega_para_ols(incorrecto, test, data)
+                self.assertEqual(tabla.Estado.tolist(), ["Error", "Correcto"])
+                self.assertTrue(tabla.attrs["errores"])
+                # Una cabecera duplicada no debe ser aceptada por la lectura de pandas.
+                ruta = data / "test_transformado.csv"
+                texto = ruta.read_text(encoding="utf-8")
+                ruta.write_text(texto.replace("price_rub", "id", 1), encoding="utf-8")
+                tabla = pt.validar_entrega_para_ols(train, test, data)
+                self.assertEqual(tabla.Estado.tolist(), ["Correcto", "Error"])
+                self.assertIn("duplicados", "; ".join(tabla.attrs["errores"]))
+
     def test_normalizador_convencion_central_y_valores_exactos(self):
         anteriores = ["num__total_area", "mom__secondary_mom_change_pct", "bin__has_balcony",
                       "cat__building_type_panel", "district__Alekseevsky",

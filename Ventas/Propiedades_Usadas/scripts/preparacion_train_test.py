@@ -4,6 +4,7 @@ Cada etapa recibe el DataFrame vigente. Las copias crudas son solo trazabilidad.
 """
 
 import hashlib
+import csv
 import json
 import re
 import shutil
@@ -660,9 +661,37 @@ def exportar_conjunto(datos, matriz, archivo):
     return {"filas": len(exportado), "predictoras": matriz.shape[1], "sha256": huella_archivo(archivo)}
 
 
+def estado_aprendido(objetos):
+    """Parámetros y esquemas persistidos, sin ejecutar fit ni transform."""
+    preparacion, base = objetos["preparacion"], objetos["base"]
+    distrito, temporal = objetos["district"], objetos["extraccion"]
+    filtro, escala = objetos["filtro"], objetos["escalado"]
+    codificadores = {"base": base.named_transformers_["cat"],
+                    "district": distrito.named_steps["onehot"], "mes": temporal.mes_}
+    return {
+        "columnas_X": objetos["columnas_X"],
+        "imputadores": {k: getattr(preparacion, k).statistics_ for k in
+                        ("numerico_", "mensual_", "binario_", "categorico_")},
+        "indicadores": preparacion.numerico_.indicator_.features_,
+        "categorias": {k: {"categorias": e.categories_, "referencias": e.drop_idx_,
+                           "salidas": e.get_feature_names_out(), "opciones": e.get_params()}
+                       for k, e in codificadores.items()},
+        "imputador_district": distrito.named_steps["imputar"].statistics_,
+        "origen_mes": temporal.origen_mes_,
+        "correspondencia": filtro.named_steps["nombres"].correspondencia_,
+        "roles": filtro.named_steps["nombres"].roles_salida_,
+        "varianzas": filtro.named_steps["constantes"].variances_,
+        "duplicadas": filtro.named_steps["duplicadas"].duplicadas_,
+        "seleccionadas": filtro.get_feature_names_out(),
+        "escala": registro_escalado(escala),
+    }
+
+
 def exportar_entrega_final(train, test, train_crudo, test_crudo, objetos, contrato, carpeta, *, carpeta_artefactos):
     """Publica datasets separados y reglas Train verificadas; manifiesto escrito al final."""
     columnas = list(objetos["columnas_X"])
+    if set(columnas).intersection([*AUXILIARES, OBJETIVO]):
+        raise ValueError("La respuesta y los auxiliares no pueden ser predictores.")
     for datos in (train, test):
         verificar_excluidas(datos)
         validar_matriz(obtener_X(datos), datos, columnas=columnas)
@@ -693,12 +722,9 @@ def exportar_entrega_final(train, test, train_crudo, test_crudo, objetos, contra
         joblib.dump(paquete, ruta_objetos, compress=3)
         recuperados = joblib.load(ruta_objetos)
         huella_recuperada = joblib.hash(recuperados)
-        # Reproducir ambos conjuntos solo con transform; nunca reaplicar Tukey a Test.
-        for original, esperado in ((retenidos, train), (test_crudo, test)):
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", UserWarning)
-                reproducido = aplicar_flujo(original, recuperados)[0]
-            pd.testing.assert_frame_equal(reproducido, esperado)
+        # La exportación no reconstruye ni vuelve a transformar los datos acumulados.
+        np.testing.assert_equal(estado_aprendido(paquete), estado_aprendido(recuperados))
+        np.testing.assert_equal(contrato, recuperados["configuracion"])
         if joblib.hash(recuperados) != huella_recuperada or joblib.hash(paquete) != huella_antes:
             raise ValueError("La reutilización modificó los parámetros ajustados con Train.")
         resumen = {}
@@ -713,7 +739,8 @@ def exportar_entrega_final(train, test, train_crudo, test_crudo, objetos, contra
             "version_flujo": contrato["version_flujo"], "columnas_X": columnas,
             "train": resumen["train"], "test": resumen["test"],
             "filas_train_original": len(train_crudo), "filas_test_original": len(test_crudo),
-            "test_sin_filtrado_objetivo": True, "reproduccion_sin_fit": True,
+            "test_sin_filtrado_objetivo": True, "exportacion_desde_dataframes_finales": True,
+            "parametros_recuperados_sin_cambios": True,
             "modulo_sha256": huella_archivo(Path(__file__)),
             "archivos_sha256": {nombre: huella_archivo(staging / nombre) for nombre in nombres},
         }
@@ -724,8 +751,10 @@ def exportar_entrega_final(train, test, train_crudo, test_crudo, objetos, contra
             from .contrato_datasets import CONTRATO, DATA_DIR
             if carpeta.resolve() != DATA_DIR:
                 raise ValueError('Usar la ubicación única de datasets: Propiedades_Usadas/data.')
+            if columnas != CONTRATO["columnas_X"]:
+                raise ValueError("Las predictoras difieren del contrato de datos.")
             for conjunto in ('train', 'test'):
-                if resumen[conjunto]['sha256'] != CONTRATO[conjunto]['sha256']:
+                if any(resumen[conjunto][k] != v for k, v in CONTRATO[conjunto].items()):
                     raise ValueError('La entrega difiere del contrato congelado; revisar antes de actualizar datasets.')
         # Solo los dos datasets son permanentes; reproducibilidad en el temporal.
         for nombre in nombres[:2]:
@@ -733,4 +762,66 @@ def exportar_entrega_final(train, test, train_crudo, test_crudo, objetos, contra
         for nombre in [ruta_objetos.name, "manifiesto_exportacion.json"]:
             shutil.copyfile(staging / nombre, carpeta_artefactos / nombre)
     return manifiesto
+
+
+def validar_entrega_para_ols(train, test, carpeta):
+    """Recarga la entrega definitiva y prueba el mismo lector que usa 3_Modelo_OLS."""
+    from .contrato_datasets import CONTRATO, ruta_dataset
+    from . import baseline_ols
+    carpeta = Path(carpeta)
+    resultados, errores, recargados = [], [], {}
+    for conjunto, esperado in (("train", train), ("test", test)):
+        archivo = carpeta / f"{conjunto}_transformado.csv"
+        fila = {"Archivo exportado": archivo.name, "Observaciones": None,
+                "Variables predictoras": None, "Columnas totales": None, "Estado": "Error"}
+        try:
+            if archivo.resolve() != ruta_dataset(archivo.name, carpeta.parent).resolve():
+                raise ValueError("El archivo no está en la ruta data/ esperada por OLS.")
+            with archivo.open(encoding="utf-8", newline="") as fuente:
+                cabecera = next(csv.reader(fuente))
+            if len(cabecera) != len(set(cabecera)):
+                raise ValueError("El CSV contiene encabezados duplicados.")
+            datos = pd.read_csv(archivo, dtype={"id": "string"}, parse_dates=["date_posted_dt"],
+                                float_precision="round_trip")
+            X = obtener_X(datos)
+            fila.update({"Observaciones": len(datos), "Variables predictoras": X.shape[1],
+                         "Columnas totales": datos.shape[1]})
+            contrato = CONTRATO[conjunto]
+            if (cabecera != [*AUXILIARES, OBJETIVO, *CONTRATO["columnas_X"]]
+                    or X.columns.tolist() != CONTRATO["columnas_X"]):
+                raise ValueError("Los nombres u orden de columnas difieren del contrato.")
+            if (huella_archivo(archivo) != contrato["sha256"] or len(datos) != contrato["filas"]
+                    or X.shape[1] != contrato["predictoras"] or datos.shape[1] != contrato["columnas"]
+                    or archivo.name != contrato["archivo"]
+                    or str(datos.date_posted_dt.min().date()) != contrato["fecha_min"]
+                    or str(datos.date_posted_dt.max().date()) != contrato["fecha_max"]):
+                raise ValueError("La huella, dimensiones o fechas difieren del contrato.")
+            if not all(pd.api.types.is_numeric_dtype(X[c]) for c in X):
+                raise ValueError("Hay predictoras no numéricas.")
+            validar_matriz(X, datos, columnas=CONTRATO["columnas_X"])
+            verificar_excluidas(datos)
+            if not datos.dataset_split.eq(conjunto).all():
+                raise ValueError("Asignación Train/Test incorrecta.")
+            pd.testing.assert_frame_equal(datos, esperado.reset_index(drop=True),
+                                          check_dtype=False, check_exact=True)
+            recargados[conjunto] = datos
+            fila["Estado"] = "Correcto"
+        except (AssertionError, ValueError, OSError, KeyError, StopIteration) as exc:
+            errores.append(f"{archivo.name}: {exc}")
+        resultados.append(fila)
+    if "train" in recargados:
+        try:
+            X_ols, y_ols, contexto = baseline_ols.cargar_train(carpeta.parent)
+            pd.testing.assert_frame_equal(X_ols, obtener_X(recargados["train"]), check_dtype=False,
+                                          check_exact=False, rtol=1e-12, atol=1e-12)
+            pd.testing.assert_series_equal(y_ols, recargados["train"][OBJETIVO], check_dtype=False,
+                                           check_exact=True)
+            if contexto["test_utilizado"] or set(X_ols).intersection([*AUXILIARES, OBJETIVO]):
+                raise ValueError("OLS incorporó Test, la respuesta o auxiliares como predictores.")
+        except (AssertionError, ValueError, OSError, KeyError) as exc:
+            resultados[0]["Estado"] = "Error"
+            errores.append(f"cargar_train(): {exc}")
+    tabla = pd.DataFrame(resultados)
+    tabla.attrs["errores"] = errores
+    return tabla
 

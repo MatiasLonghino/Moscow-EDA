@@ -69,11 +69,12 @@ def elegir_por_complejidad(candidatos, rmse_intercepto, *, min_mejora_pct=.5, ma
     return aceptado, decisiones
 
 
-def buscar_group_lasso(X, y, grupos, fit, val, salida, *, lambdas=None, config=None):
+def buscar_group_lasso(X, y, grupos, fit, val, salida, *, lambdas=None, config=None,
+                       excluidas=s.EXCLUIDAS):
     cfg = {**CONFIG, **(config or {})}
     if not 1 <= cfg['max_features'] <= 12 or cfg['min_mejora_pct'] < 0:
         raise ValueError('Máximo absoluto 12 y mejora mínima no negativa.')
-    assert X.index.equals(y.index) and not set(s.EXCLUIDAS) & set(X)
+    assert X.index.equals(y.index) and not set(excluidas) & set(X)
     assert not set(fit) & set(val) and len(fit)+len(val) == len(X)
     assert set(fit) | set(val) == set(range(len(X)))
     assert set(s.columnas_grupos(grupos, list(grupos))) == set(X)
@@ -154,7 +155,8 @@ def buscar_group_lasso(X, y, grupos, fit, val, salida, *, lambdas=None, config=N
     return resultado
 
 
-def entrenar_exportar(base, X, y, grupos, seleccion, contexto_train, referencia, salida):
+def entrenar_exportar(base, X, y, grupos, seleccion, contexto_train, referencia, salida,
+                     *, excluidas=s.EXCLUIDAS, nombre_run=NOMBRE_RUN):
     columnas = s.columnas_grupos(grupos, seleccion['seleccionadas'])
     modelo, diseno = b.ajustar(X[columnas], np.log(y))
     assert modelo.model.rank == len(columnas)+1 and modelo.nobs == len(y)
@@ -164,13 +166,13 @@ def entrenar_exportar(base, X, y, grupos, seleccion, contexto_train, referencia,
         selection_rmse_intercept_original=seleccion['rmse_intercepto_original'],
         selection_lambda=seleccion['lambda'])
     contexto = {**contexto_train, 'predictoras': columnas, 'n_predictoras': len(columnas),
-        'transformacion_objetivo': 'ln', 'unidad': 'ln(RUB)', 'predictoras_excluidas': list(s.EXCLUIDAS),
+        'transformacion_objetivo': 'ln', 'unidad': 'ln(RUB)', 'predictoras_excluidas': list(excluidas),
         'seleccion_caracteristicas': 'group_lasso_then_ols', 'reference_run_id': referencia['run_id'],
         'caracteristicas_originales': seleccion['seleccionadas']}
     out = b.exportar(base, modelo, diseno, np.log(y), contexto, metricas, invalidas, vif, notas,
-                     nombre_run=NOMBRE_RUN, carpeta_salida=salida)
+                     nombre_run=nombre_run, carpeta_salida=salida)
     tabla = s.tabla_comparativa(referencia['metrics'], metricas, invalidas,
-                                nombre_referencia=s.NOMBRE_RUN, nombre_run=NOMBRE_RUN)
+                                nombre_referencia=referencia['run_name'], nombre_run=nombre_run)
     resumen = s.resumen_caracteristicas(seleccion['seleccionadas'], grupos, modelo, mostrar_orden=False)
     (out/'comparacion_referencia.md').write_text(tabla, encoding='utf-8')
     (out/'caracteristicas_seleccionadas.md').write_text(resumen, encoding='utf-8')
@@ -180,10 +182,10 @@ def entrenar_exportar(base, X, y, grupos, seleccion, contexto_train, referencia,
             'comparacion_md': tabla, 'caracteristicas_md': resumen}
 
 
-def registrar(cliente, resultado, seleccion, referencia):
+def registrar(cliente, resultado, seleccion, referencia, *, nombre_run=NOMBRE_RUN):
     cfg = seleccion['config']
     assert not cliente.search_runs([referencia['experiment_id']],
-        filter_string=f"tags.mlflow.runName = '{NOMBRE_RUN}'", max_results=1), 'El Run ya existe; no sobrescribir.'
+        filter_string=f"tags.mlflow.runName = '{nombre_run}'", max_results=1), 'El Run ya existe; no sobrescribir.'
     params = {'algorithm': 'Group Lasso + OLS', 'min_mejora_pct': cfg['min_mejora_pct'],
         'max_features': cfg['max_features'], 'lambda_selected': seleccion['lambda'],
         'lambda_grid': json.dumps(seleccion['lambdas']), 'group_weight': 'sqrt(effective_group_rank)',
@@ -192,13 +194,13 @@ def registrar(cliente, resultado, seleccion, referencia):
         'selection_solver_tol': cfg['solver_tol'], 'selection_solver_max_iter': cfg['max_iter'],
         'objective': '||yc-Zb||^2/(2n) + lambda * sum(sqrt(p_g)*||b_g||_2)',
         'n_features_original': len(seleccion['seleccionadas']), 'selected_features': json.dumps(seleccion['seleccionadas']),
-        'reference_run_name': s.NOMBRE_RUN, 'reference_run_id': referencia['run_id'],
+        'reference_run_name': referencia['run_name'], 'reference_run_id': referencia['run_id'],
         'experiment_id': referencia['experiment_id'], 'notebook': '4_Seleccion_Modelos.ipynb',
-        'validation_fraction': .2, 'random_state': 42, 'permutation_repeats': 10,
+        'validation_fraction': .2, 'random_state': referencia['params']['random_state'], 'permutation_repeats': 10,
         'selection_stop_reason': seleccion['motivo_parada']}
     b.guardar_json(resultado['salida']/'configuracion.json', params)
     registro = b.registrar(cliente, resultado['salida'], resultado['contexto'], resultado['metricas'],
-                           nombre_run=NOMBRE_RUN, parametros_extra=params)
+                           nombre_run=nombre_run, parametros_extra=params)
     actual = cliente.get_run(referencia['run_id'])
     assert actual.data.metrics == referencia['metrics'] and actual.data.params == referencia['params']
     assert actual.info.status == 'FINISHED'

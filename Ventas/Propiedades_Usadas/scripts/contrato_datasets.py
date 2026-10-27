@@ -190,7 +190,8 @@ CONTRATO = {'columnas_X': ['total_area',
           'columnas': 181,
           'fecha_min': '2025-01-17',
           'fecha_max': '2026-04-29'},
- 'manifiesto_sha256': 'ee28338f9e47cc166bf6161b80045b723de5a643b360d8a72e51133f4889505c'}
+ 'manifiesto_origen_sha256': 'ee28338f9e47cc166bf6161b80045b723de5a643b360d8a72e51133f4889505c',
+ 'manifiesto_sha256': '5d2e783ca300d2f202efc071a04d08128264b40d0c6c9430a70a3a0537108b37'}
 
 
 from pathlib import Path
