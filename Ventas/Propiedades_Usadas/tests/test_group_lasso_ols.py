@@ -9,10 +9,8 @@ import joblib
 import numpy as np
 import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import group_lasso_ols as gl
-import seleccion_modelos as s
-
-
+from scripts import group_lasso_ols as gl
+from scripts import seleccion_modelos as s
 class GroupLassoTests(unittest.TestCase):
     def test_resumen_dos_columnas_con_total(self):
         modelo = SimpleNamespace(model=SimpleNamespace(exog_names=['const', 'a'], rank=2))
@@ -58,7 +56,7 @@ class GroupLassoTests(unittest.TestCase):
         X.loc[120:, 'area'] += 2
         y = np.exp(15 + .5*X.d_a + .2*X.d_b + .3*X.area + rng.normal(0, .02, len(X)))
         grupos = {'district': ['d_a', 'd_b'], 'area': ['area']}
-        with TemporaryDirectory(dir=Path(__file__).resolve().parent) as tmp:
+        with TemporaryDirectory() as tmp:
             resultado = gl.buscar_group_lasso(X, y, grupos, np.arange(120), np.arange(120, 180), tmp,
                                               lambdas=[.1, .03, .01])
             scaler = joblib.load(Path(tmp)/'scaler_seleccion.joblib')

@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from transformaciones_experimentales import (
+from scripts.transformaciones_experimentales import (
     ARTEFACTO_MAPAS, aplicar_agrupamiento, contexto_entrenamiento, crear_artefacto,
     generar_representacion, huella_json, recuperar_agrupamiento,
     preparar_df_seleccionado,

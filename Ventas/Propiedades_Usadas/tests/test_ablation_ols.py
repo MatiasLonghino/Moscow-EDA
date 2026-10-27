@@ -11,10 +11,8 @@ import pytest
 from statsmodels.regression.linear_model import OLSResults
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import baseline_ols as b
-import diagnosticos_residuales as dr
-
-
+from scripts import baseline_ols as b
+from scripts import diagnosticos_residuales as dr
 def test_anidados_hc3_y_modelo_completo_serializado(tmp_path):
     rng=np.random.default_rng(73)
     X=pd.DataFrame(rng.normal(size=(180,3)),columns=["area","to_center_km","rooms"])

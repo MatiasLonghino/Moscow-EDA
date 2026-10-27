@@ -7,9 +7,7 @@ from unittest.mock import patch
 import numpy as np
 import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import seleccion_modelos as s
-
-
+from scripts import seleccion_modelos as s
 class PresentacionTests(unittest.TestCase):
     def setUp(self):
         rng = np.random.default_rng(29)

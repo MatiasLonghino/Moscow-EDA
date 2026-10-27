@@ -8,10 +8,10 @@ import joblib
 import numpy as np
 import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import preparacion_train_test as pt
-import resumen_transformacion as rt
-from actualizar_indice_transformacion import actualizar_indice
-from preparacion_train_test import (cargar_y_dividir, filtrar_outliers_tukey_train,
+from scripts import preparacion_train_test as pt
+from scripts import resumen_transformacion as rt
+from scripts.actualizar_indice_transformacion import actualizar_indice
+from scripts.preparacion_train_test import (cargar_y_dividir, filtrar_outliers_tukey_train,
     EscaladoSelectivo, registro_escalado, crear_codificador_district)
 
 
@@ -114,9 +114,9 @@ class PreparacionTrainTest(unittest.TestCase):
                     "auditoria_train": {"superficies_corregidas": int(preparado.surface_corrected.sum())},
                     "tratamiento_objetivo": tukey, "mapas_binarios": pt.MAPAS_BINARIOS,
                     "orden_train": ["seleccion", "correccion_imputacion", "tukey", "codificacion", "extraccion", "filtro_final", "escalado"]}
-        with tempfile.TemporaryDirectory() as carpeta:
-            m = pt.exportar_entrega_final(train, test, crudo, futuro, objetos, contrato, carpeta)
-            resumen = rt.generar_resumen(carpeta, crudo, futuro)
+        with tempfile.TemporaryDirectory() as carpeta, tempfile.TemporaryDirectory() as reproducibilidad:
+            m = pt.exportar_entrega_final(train, test, crudo, futuro, objetos, contrato, carpeta, carpeta_artefactos=reproducibilidad)
+            resumen = rt.generar_resumen(carpeta, crudo, futuro, manifiesto=m, objetos=dict(objetos, configuracion=contrato))
             inventario = resumen["tablas"]["Inventario agrupado de predictoras"]
             self.assertEqual(inventario.Cantidad.sum(), len(objetos["columnas_X"]))
             self.assertEqual(list(resumen["linaje"]), objetos["columnas_X"])
@@ -125,12 +125,12 @@ class PreparacionTrainTest(unittest.TestCase):
             self.assertTrue(set(extraidas.Característica).issubset(train))
             self.assertFalse(any(resumen["linaje"][c]["tipo"] == "onehot" for c in extraidas.Característica))
             for nombre, huella in m["archivos_sha256"].items():
-                self.assertEqual(pt.huella_archivo(Path(carpeta) / nombre), huella)
-            rt.guardar_resumen(resumen, Path(carpeta) / "resumen_final.json")
+                self.assertEqual(pt.huella_archivo(Path(carpeta if nombre.endswith(".csv") else reproducibilidad) / nombre), huella)
+            rt.guardar_resumen(resumen, Path(reproducibilidad) / "resumen_final.json")
             ruta = Path(carpeta) / "train_transformado.csv"
             ruta.write_text(ruta.read_text(encoding="utf-8") + "\n", encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "Entrega inconsistente"):
-                rt.generar_resumen(carpeta, crudo, futuro)
+                rt.generar_resumen(carpeta, crudo, futuro, manifiesto=m, objetos=dict(objetos, configuracion=contrato))
 
     def test_grupos_ohe_proceden_de_encoder_no_de_prefijos(self):
         from sklearn.preprocessing import OneHotEncoder
@@ -168,12 +168,13 @@ class PreparacionTrainTest(unittest.TestCase):
 
     def test_entrega_csv_separados_y_paquete_recuperable(self):
         train, test, crudo, futuro, objetos = self.preparar_entrega()
-        with tempfile.TemporaryDirectory() as carpeta:
+        with tempfile.TemporaryDirectory() as carpeta, tempfile.TemporaryDirectory() as reproducibilidad:
             manifiesto = pt.exportar_entrega_final(train, test, crudo, futuro, objetos,
-                                                   {"version_flujo": 2}, carpeta)
+                                                   {"version_flujo": 2}, carpeta, carpeta_artefactos=reproducibilidad)
             for nombre, huella in manifiesto["archivos_sha256"].items():
-                self.assertEqual(pt.huella_archivo(Path(carpeta) / nombre), huella)
-            recuperados = joblib.load(Path(carpeta) / "transformadores_prop_usadas.joblib")
+                self.assertEqual(pt.huella_archivo(Path(carpeta if nombre.endswith(".csv") else reproducibilidad) / nombre), huella)
+            self.assertEqual({p.suffix for p in Path(carpeta).iterdir()}, {".csv"})
+            recuperados = joblib.load(Path(reproducibilidad) / "transformadores_prop_usadas.joblib")
             pd.testing.assert_frame_equal(pt.aplicar_flujo(futuro, recuperados)[0], test)
             archivos = [pd.read_csv(Path(carpeta) / f"{c}_transformado.csv") for c in ["train", "test"]]
             self.assertEqual(archivos[0].columns.tolist(), archivos[1].columns.tolist())
@@ -182,16 +183,16 @@ class PreparacionTrainTest(unittest.TestCase):
             self.assertEqual(manifiesto["test"]["filas"], len(futuro))
             self.assertLess(manifiesto["train"]["filas"], len(crudo))
             regenerado = pt.exportar_entrega_final(train, test, crudo, futuro, objetos,
-                                                   {"version_flujo": 2}, carpeta)
+                                                   {"version_flujo": 2}, carpeta, carpeta_artefactos=reproducibilidad)
             self.assertEqual(manifiesto, regenerado)
 
     def test_entrega_rechaza_test_recortado_o_reordenado(self):
         train, test, crudo, futuro, objetos = self.preparar_entrega()
-        with tempfile.TemporaryDirectory() as carpeta:
+        with tempfile.TemporaryDirectory() as carpeta, tempfile.TemporaryDirectory() as reproducibilidad:
             for incorrecto in [test.iloc[:-1], test.iloc[::-1]]:
                 with self.assertRaises(AssertionError):
                     pt.exportar_entrega_final(train, incorrecto, crudo, futuro, objetos,
-                                               {"version_flujo": 2}, carpeta)
+                                               {"version_flujo": 2}, carpeta, carpeta_artefactos=reproducibilidad)
             self.assertEqual(list(Path(carpeta).iterdir()), [])
 
     def test_escala_descubre_solo_numericas_predictoras_actuales(self):

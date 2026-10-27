@@ -1,7 +1,0 @@
-{
-  "entrada_sha256": "e6f20c2be10600c34822faff007742e4a9965b7f3492b00d8612ea1aadb40491",
-  "fraccion_train_objetivo": 0.8,
-  "criterio": "fecha completa más cercana al 80%; empate: corte anterior",
-  "ultima_fecha_train": "2025-01-16",
-  "filas_entrada": 50000
-}

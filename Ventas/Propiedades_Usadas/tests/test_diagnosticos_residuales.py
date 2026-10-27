@@ -11,7 +11,7 @@ import statsmodels.api as sm
 from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from diagnosticos_residuales import (
+from scripts.diagnosticos_residuales import (
     ARCHIVOS, generar_diagnosticos_residuales,
     registrar_diagnosticos_residuales, residuos_train,
 )

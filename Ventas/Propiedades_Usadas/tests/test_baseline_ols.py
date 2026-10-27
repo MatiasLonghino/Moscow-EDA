@@ -1,4 +1,4 @@
-"""Validación independiente de unidades, VIF e integridad del contrato."""
+"""ValidaciÃ³n independiente de unidades, VIF e integridad del contrato."""
 import sys
 from pathlib import Path
 import numpy as np
@@ -6,8 +6,7 @@ import pandas as pd
 import pytest
 from statsmodels.stats.outliers_influence import variance_inflation_factor
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-import baseline_ols as b
-
+from scripts import baseline_ols as b
 def ejemplo(redundante=False):
     rng=np.random.default_rng(49)
     X=pd.DataFrame(rng.normal(size=(120,3)),columns=["a","b","c"])
@@ -39,7 +38,7 @@ def test_singularidad_no_elimina_columnas():
 
 def test_train_exportado_conservado():
     base=Path(__file__).resolve().parents[1]
-    archivo=base/"salidas_transformacion/train_transformado.csv"
+    archivo=base/"data/train_transformado.csv"
     antes=b.sha256(archivo)
     X,y,contexto=b.cargar_train(base)
     assert contexto["test_utilizado"] is False

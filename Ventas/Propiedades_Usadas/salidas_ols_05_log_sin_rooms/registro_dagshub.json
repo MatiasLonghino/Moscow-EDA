@@ -1,8 +1,0 @@
-{
-  "run_id": "f68265a7164742159c9807d91fa4f8e5",
-  "experiment_id": "5",
-  "experiment_name": "Modelos Propiedades_Usadas",
-  "run_name": "OLS_05_Log_Sin_rooms",
-  "status": "FINISHED",
-  "url": "https://dagshub.com/matiasgastonlonghino/MOSCOW_IDA.mlflow/#/experiments/5/runs/f68265a7164742159c9807d91fa4f8e5"
-}

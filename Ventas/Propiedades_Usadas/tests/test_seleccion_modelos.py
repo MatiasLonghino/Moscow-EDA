@@ -8,9 +8,7 @@ from unittest.mock import Mock
 import numpy as np
 import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import seleccion_modelos as s
-
-
+from scripts import seleccion_modelos as s
 class ForwardTests(unittest.TestCase):
     def setUp(self):
         rng = np.random.default_rng(42)

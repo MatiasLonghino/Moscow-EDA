@@ -10,3 +10,6 @@ venv/
 # Archivos temporales de Python
 __pycache__/
 .ipynb_checkpoints/
+
+# Los resultados experimentales se conservan en DagsHub/MLflow.
+/Ventas/Propiedades_Usadas/salidas_*/

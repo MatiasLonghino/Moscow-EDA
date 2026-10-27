@@ -8,9 +8,7 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from statsmodels.regression.linear_model import OLSResults
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import baseline_ols as b
-
-
+from scripts import baseline_ols as b
 def ejemplo():
     rng = np.random.default_rng(28)
     X = pd.DataFrame(rng.normal(size=(120, 3)), columns=["area", "rooms", "to_center_km"])
