@@ -1,0 +1,702 @@
+CELL 0 MARKDOWN
+# Transformación de propiedades usadas
+
+
+CELL 1 MARKDOWN
+<a id="indice"></a>
+
+## Índice
+
+- [1. Carga y partición cronológica fija 80/20](#seccion-carga-particion-0)
+- [2. Feature Selection inicial](#seccion-seleccion-inicial-1)
+- [3. Corrección e imputación](#seccion-preparacion-inicial-2)
+- [4. Tratamiento de valores atípicos de la variable objetivo](#seccion-objetivo-outliers-3)
+  - [4.1. Tukey sobre el Train ya preparado](#seccion-objetivo-outliers-4)
+- [5. Variables predictoras](#seccion-features-transform-5)
+  - [5.1. Feature Transformation — codificación](#seccion-features-transform-6)
+    - [5.1.1. Codificación de district — One-Hot Encoding](#seccion-district-codificacion-7)
+  - [5.2. Feature Extraction](#seccion-feature-extraction-8)
+  - [5.3. Feature Selection final — constantes y duplicadas](#seccion-filtro-final-9)
+  - [5.4. Feature Transformation — escala numérica](#seccion-analisis-escala-10)
+    - [5.4.1. Análisis de escala y distribución de variables numéricas](#seccion-analisis-escala-11)
+    - [5.4.2. Aplicación de la escala seleccionada](#seccion-decision-escala-12)
+- [6. Aplicación de las transformaciones a Test](#seccion-test-final-14)
+- [7. Exportación de datasets transformados y persistencia de transformadores](#seccion-exportacion-final-15)
+- [8. Resumen final de transformaciones y características del dataset](#seccion-resumen-final-16)
+
+Actualizar después de agregar, eliminar, renombrar o mover secciones: `python Ventas/Propiedades_Usadas/scripts/actualizar_indice_transformacion.py` desde la raíz del proyecto. `--check` verifica la sincronización sin escribir.
+
+
+CELL 2 MARKDOWN
+<a id="seccion-carga-particion-0"></a>
+
+## 1. Carga y partición cronológica fija 80/20
+
+
+CELL 3 CODE
+from pathlib import Path
+import importlib
+import sys
+import warnings
+from importlib.metadata import version
+
+import joblib
+import numpy as np
+import pandas as pd
+from IPython.display import display
+
+# Configuración única del paquete para ejecutar desde la raíz o el notebook.
+carpeta_paquete = next((c for p in (Path.cwd(), *Path.cwd().parents)
+    for c in (p, p / "Ventas/Propiedades_Usadas")
+    if (c / "scripts/__init__.py").is_file()), None)
+if carpeta_paquete is None:
+    raise RuntimeError("Ejecutar el notebook dentro del proyecto Moscow_EDA.")
+if str(carpeta_paquete) not in sys.path:
+    sys.path.insert(0, str(carpeta_paquete))
+from scripts.contrato_datasets import (
+    CARPETA_PROYECTO, DATA_DIR as DATOS_PROYECTO, DATASETS, SCRIPTS_DIR, RAIZ as raiz,
+)
+carpeta_notebook = CARPETA_PROYECTO
+from scripts import preparacion_train_test as pt
+pt = importlib.reload(pt)  # Evitar configuraciones antiguas en un kernel reutilizado.
+entrada = DATASETS["PropUsadas_Integrado.csv"]
+from scripts.almacenamiento_mlflow import SesionTemporal, registrar_archivos, RUN_TRANSFORMACION
+sesion = SesionTemporal()
+with sesion.paso():
+    artefactos = sesion.carpeta("transformacion")
+    train_crudo, _test_reservado, resumen_particion, contrato_particion = pt.cargar_y_dividir(entrada, artefactos)
+    trazabilidad_train = []
+    contrato_transformacion = {"version_flujo": 3}
+    display(resumen_particion)
+
+
+               registros      desde      hasta  porcentaje  desviacion_pp
+dataset_split                                                            
+train              39998 2020-01-01 2025-01-16      79.996         -0.004
+test               10002 2025-01-17 2026-04-29      20.004          0.004
+
+
+CELL 4 MARKDOWN
+<a id="seccion-seleccion-inicial-1"></a>
+
+## 2. Feature Selection inicial
+
+Se conservan únicamente las entradas definidas para el flujo. Las siguientes columnas
+se excluyen de los predictores y permanecen solo en las copias crudas:
+
+| Variable eliminada | Motivo de eliminación |
+|---|---|
+| `date_posted` | Se utiliza `date_posted_dt` como fecha de referencia. |
+| `okrug` | Fuera de la lista de predictores definida para el flujo. |
+| `lat` | Se priorizan otras medidas de ubicación y accesibilidad. |
+| `lon` | Se priorizan otras medidas de ubicación y accesibilidad. |
+| `metro_station` | aumenta considerablemente la complejidad del modelo OLS y el riesgo de sobreajuste. Además, su información puede estar parcialmente representada por variables numéricas como metro_distance_min y to_center_km. |
+| `price_per_sqm` | Riesgo de fuga de información al derivarse del precio objetivo. |
+| `year_month` | La información mensual se extrae de `date_posted_dt`. |
+| `secondary_price_per_sqm` | Se predice el precio total, sin precios por unidad de superficie. |
+| `newbuild_price_per_sqm` | Se predice el precio total, sin precios por unidad de superficie. |
+| `newbuild_mom_change_pct` | Se conserva solo la variación mensual del mercado secundario. |
+| `n_listings_secondary` | Fuera de la lista de predictores definida para el flujo. |
+| `n_listings_newbuild` | Fuera de la lista de predictores definida para el flujo. |
+| `cbr_key_rate_pct` | Redundancia financiera; se prioriza `mortgage_key_rate_at_listing`. |
+| `avg_mortgage_rate_pct` | Redundancia financiera; se prioriza `mortgage_key_rate_at_listing`. |
+| `metro_lat` | Se priorizan otras medidas de ubicación y accesibilidad. |
+| `metro_lon` | Se priorizan otras medidas de ubicación y accesibilidad. |
+| `metro_year_opened` | Año de apertura fuera del enfoque actual. |
+
+Se conserva `mortgage_key_rate_at_listing` mediante su alias de entrada y `district`
+para su codificación independiente.
+
+
+CELL 5 CODE
+with sesion.paso():
+    train_actual = pt.seleccionar_variables(train_crudo)
+    pt.registrar_etapa("seleccion", train_crudo, train_actual, trazabilidad_train)
+    print("Predictoras seleccionadas:", pt.obtener_X(train_actual).shape[1])
+
+
+Predictoras seleccionadas: 20
+
+
+CELL 6 MARKDOWN
+<a id="seccion-preparacion-inicial-2"></a>
+
+## 3. Corrección e imputación
+
+Sobre el Train seleccionado completo: corregir solo `total_area` si es menor que sala más
+cocina; conservar las superficies individuales observadas; validar pisos y construcción.
+
+
+Imputar numéricas con medianas, `secondary_mom_change_pct` con su media y binarias con su moda.
+Las nominales usan `__FALTANTE__`. Todos esos parámetros se ajustan **antes de Tukey**.
+
+
+
+CELL 7 CODE
+with sesion.paso():
+    anterior = train_actual
+    preparador = pt.PreparacionInicial()
+    train_actual = preparador.fit_transform(train_actual)
+    pt.registrar_etapa("correccion_imputacion", anterior, train_actual, trazabilidad_train)
+    resumen_calidad_train, auditoria_train = pt.auditar_preparacion(anterior, train_actual, preparador)
+    train_preparado_antes_tukey = train_actual.copy(deep=True)
+    print("Train preparado:", len(train_actual), "anuncios; totales corregidos:", resumen_calidad_train["superficies_corregidas"])
+    display(pd.DataFrame(resumen_calidad_train["imputaciones_mom"]).T)
+
+
+                          imputados  faltantes_finales  media_train
+secondary_mom_change_pct      678.0                0.0     0.733206
+
+Train preparado: 39998 anuncios; totales corregidos: 186
+
+
+CELL 8 MARKDOWN
+<a id="seccion-objetivo-outliers-3"></a>
+
+## 4. Tratamiento de valores atípicos de la variable objetivo
+
+<a id="seccion-objetivo-outliers-4"></a>
+
+### 4.1. Tukey sobre el Train ya preparado
+
+Q1 y Q3 de `price_rub` usan interpolación lineal. Se eliminan filas completas con precios
+fuera de Q1 − 1,5 × IQR y Q3 + 1,5 × IQR; las fronteras se conservan. El precio no se ha
+imputado ni modificado.
+
+
+CELL 9 CODE
+with sesion.paso():
+    anterior = train_actual
+    train_actual, train_outliers_preparados, resumen_tukey = pt.filtrar_outliers_tukey_train(train_actual)
+    pt.registrar_etapa("tukey", anterior, train_actual, trazabilidad_train, permite_filtrar=True)
+    ids_retenidos = train_actual["id"].copy()
+    auditoria_train["retenido_tras_tukey"] = auditoria_train["id"].isin(ids_retenidos)
+    resumen_calidad_train["superficies_corregidas_retenidas"] = int(train_actual["surface_corrected"].sum())
+    resumen_tukey_breve = {k: resumen_tukey[k] for k in ["q1", "q3", "iqr", "limite_inferior", "limite_superior",
+                           "filas_iniciales", "outliers_eliminados", "porcentaje_eliminado", "filas_finales"]}
+    display(pd.Series(resumen_tukey_breve, name="Tukey — solo Train").to_frame())
+
+
+                      Tukey — solo Train
+q1                          7.282000e+06
+q3                          1.594100e+07
+iqr                         8.659000e+06
+limite_inferior            -5.706500e+06
+limite_superior             2.892950e+07
+filas_iniciales             3.999800e+04
+outliers_eliminados         2.014000e+03
+porcentaje_eliminado        5.035252e+00
+filas_finales               3.798400e+04
+
+CELL 10 MARKDOWN
+<a id="seccion-features-transform-5"></a>
+
+## 5. Variables predictoras
+
+<a id="seccion-features-transform-6"></a>
+
+### 5.1. Feature Transformation — codificación
+
+**Primer bloque — Codificación general.** Se aplica One-Hot Encoding a `building_type`,
+`renovation` y `metro_line`. Las binarias `has_balcony`, `metro_distance_type` y `seller_type`
+ya se transformaron a 0/1 en el apartado 3 y se conservan directamente. Las variables
+numéricas también pasan sin cambios en esta etapa; `district` se codifica en el bloque siguiente.
+
+| Grupo de variables | Variables involucradas | Tratamiento aplicado |
+|---|---|---|
+| Categóricas generales | `building_type`, `renovation`, `metro_line` | One-Hot Encoding en el primer bloque. |
+| Categórica geográfica | `district` | One-Hot independiente; integración en el segundo bloque. |
+| Binarias | `has_balcony`, `metro_distance_type`, `seller_type` | Conservar los valores 0/1 obtenidos en el apartado 3. |
+| Numéricas | Superficies, conteos, año, altura, distancias, tasa hipotecaria, variación mensual e indicadores preparados | Conservar sin cambios en esta etapa. |
+
+
+CELL 11 CODE
+with sesion.paso():
+    anterior = train_actual
+    codificador_base = pt.crear_codificador_base(preparador.columnas_numericas_)
+    X_base = codificador_base.fit_transform(train_actual)
+
+
+CELL 12 MARKDOWN
+<a id="seccion-district-codificacion-7"></a>
+
+#### 5.1.1. Codificación de district — One-Hot Encoding
+
+**Segundo bloque — Codificación de `district`.** Se utiliza un codificador One-Hot
+independiente y sus columnas se integran con `X_base`, generado en el primer bloque.
+Mantenerlo separado permite revisar o sustituir en una futura iteración la representación
+de `district` sin alterar la codificación general; actualmente no se aplica otra técnica.
+Así quedan codificadas todas las categóricas seleccionadas y las binarias conservan su representación 0/1.
+
+
+CELL 13 CODE
+with sesion.paso():
+    codificador_district = pt.crear_codificador_district()
+    X_district = codificador_district.fit_transform(train_actual[["district"]])
+    train_actual = pt.reemplazar_X(train_actual, pt.integrar_caracteristicas(X_base, X_district))
+    pt.registrar_etapa("codificacion", anterior, train_actual, trazabilidad_train)
+    pt.validar_matriz(pt.obtener_X(train_actual), train_actual)
+    print("district:", len(codificador_district.named_steps["onehot"].categories_[0]),
+          "categorías;", X_district.shape[1], "columnas.")
+    del X_base, X_district
+
+
+district: 129 categorías; 128 columnas.
+
+
+CELL 14 MARKDOWN
+<a id="seccion-feature-extraction-8"></a>
+
+### 5.2. Feature Extraction
+
+A partir de `date_posted_dt` se generan las siguientes características temporales.
+El origen y las categorías se aprenden solo con Train retenido; Test aplica esas mismas reglas.
+Se muestran los nombres finales, normalizados en el apartado 5.3.
+
+| Variable generada | Variable de origen | Transformación aplicada | Finalidad |
+|---|---|---|---|
+| `months_since_start` | `date_posted_dt` | `12 × año + mes − 1 − origen_mes`, con origen en el primer mes de Train retenido. | Representar la tendencia temporal en meses. |
+| `month_of_year_*` | `date_posted_dt` | Extraer el mes calendario y aplicar One-Hot Encoding; enero es la referencia omitida en esta ejecución. | Permitir posibles diferencias estacionales entre meses. |
+
+
+
+CELL 15 CODE
+
+
+CELL 16 CODE
+with sesion.paso():
+    anterior = train_actual
+    extractor_temporal = pt.ExtraccionTemporal()
+    train_actual = extractor_temporal.fit_transform(train_actual)
+    pt.registrar_etapa("extraccion", anterior, train_actual, trazabilidad_train)
+
+    pt.validar_superficies(train_actual)
+
+
+CELL 17 MARKDOWN
+<a id="seccion-filtro-final-9"></a>
+
+### 5.3. Feature Selection final — constantes y duplicadas
+
+Esta **depuración técnica de características** se ajusta con Train después de la extracción
+y antes del escalado. Realiza, en orden:
+
+1. **Normalización de nombres:** aplica la convención `snake_case`, elimina prefijos técnicos
+   y comprueba colisiones, sin cambiar los valores.
+2. **Eliminación de constantes:** `VarianceThreshold(0)` retira columnas con varianza cero en Train.
+3. **Eliminación de duplicadas:** retira columnas con valores idénticos en todas las filas de Train,
+   conservando la primera aparición y el orden de las restantes.
+
+Resultados comprobados con la ejecución actual:
+
+| Resultado | Cantidad de variables |
+|---|---:|
+| Antes del proceso | 178 |
+| Constantes eliminadas | 0 |
+| Duplicadas eliminadas | 1 |
+| Predictoras finales | 177 |
+
+Se elimina `building_year_inconsistent`, idéntica a `missingindicator_building_year`,
+que aparece primero y se conserva. No se elimina ninguna variable constante.
+Test recibe el mismo renombrado y las columnas seleccionadas con Train, sin reajustar los filtros.
+
+Esta etapa no utiliza la relación con `price_rub` para seleccionar predictores.
+La selección estadística mediante OLS, Best Subset Selection y Stepwise Selection se realizará posteriormente.
+
+
+CELL 18 CODE
+with sesion.paso():
+    anterior = train_actual
+    roles_candidatas = pt.roles_candidatas(preparador, codificador_base, codificador_district, extractor_temporal)
+    filtro_final = pt.crear_filtro_final(roles_candidatas)
+    train_actual = pt.reemplazar_X(train_actual, filtro_final.fit_transform(pt.obtener_X(train_actual)))
+    pt.registrar_etapa("filtro_final", anterior, train_actual, trazabilidad_train)
+    pt.validar_superficies(train_actual, exigir_columnas=False)
+    pt.validar_matriz(pt.obtener_X(train_actual), train_actual)
+    if len(train_actual) != resumen_tukey["filas_finales"]:
+        raise ValueError("Se reincorporaron o perdieron registros después de Tukey.")
+
+
+CELL 19 MARKDOWN
+<a id="seccion-analisis-escala-10"></a>
+
+### 5.4. Feature Transformation — escala numérica
+
+El análisis se realiza sobre las **14 numéricas que sobreviven al filtro final**. Se revisan
+sus rangos, dispersión y asimetría para elegir la escala, sin volver a filtrar observaciones.
+
+| Variable o grupo de variables | Escalado aplicado | Justificación breve |
+|---|---|---|
+| `building_year` | Estandarización con `StandardScaler`. | Centrar y escalar el año de construcción para mejorar el condicionamiento numérico. |
+| Otras 13 numéricas | Sin escalado. | Conservar sus unidades e interpretar los coeficientes. |
+| Binarias y One-Hot | Sin escalado adicional. | Mantener su representación 0/1. |
+| Min-Max Scaling | No se utiliza. | No se requiere igualar rangos para OLS sin penalización. |
+
+Las otras numéricas son las superficies (`total_area`, `living_area`, `kitchen_area`),
+`rooms`, `floor`, `total_floors`, `ceiling_height`, `metro_distance_min`, `to_center_km`,
+`metro_to_center_km`, `mortgage_key_rate_at_listing`, `secondary_mom_change_pct` y `months_since_start`.
+
+<a id="seccion-analisis-escala-11"></a>
+
+#### 5.4.1. Análisis de escala y distribución de variables numéricas
+
+Se calculan estadísticas sobre el Train actual, antes de escalar. El detalle se conserva
+como soporte de la decisión, sin desplegar tablas extensas. El escalado no elimina la asimetría.
+
+
+CELL 20 CODE
+with sesion.paso():
+    if not trazabilidad_train or trazabilidad_train[-1]["etapa"] != "filtro_final":
+        raise ValueError("El análisis requiere el Train acumulado sin escalar, después del filtro final.")
+    X_train = pt.obtener_X(train_actual)
+    pt.validar_matriz(X_train, train_actual)
+    columnas_modelo = X_train.columns.tolist()
+    columnas_evaluadas = pt.columnas_para_escala(X_train, filtro_final.named_steps["nombres"].roles_salida_)
+    origen_analisis_escala = {
+        "dataframe": "pt.obtener_X(train_actual)", "etapa_previa": "filtro_final",
+        "filas": len(X_train), "predictoras": X_train.shape[1],
+        "columnas_evaluadas": columnas_evaluadas, "huella_matriz": joblib.hash(X_train),
+        "ids_sha256": trazabilidad_train[-1]["ids_sha256"],
+    }
+    contrato_transformacion["origen_analisis_escala"] = origen_analisis_escala
+    numericas_train = X_train[columnas_evaluadas]
+    tabla_estadisticas = pd.DataFrame({
+        "minimo": numericas_train.min(), "maximo": numericas_train.max(),
+        "rango": numericas_train.max() - numericas_train.min(),
+        "media": numericas_train.mean(), "mediana": numericas_train.median(),
+        "desv_estandar": numericas_train.std(ddof=1),
+        "Q1": numericas_train.quantile(.25), "Q3": numericas_train.quantile(.75),
+        "asimetria": numericas_train.skew(),
+    })
+    iqr_numericas = tabla_estadisticas["Q3"] - tabla_estadisticas["Q1"]
+    extremos = numericas_train.lt(tabla_estadisticas["Q1"] - 1.5 * iqr_numericas)
+    extremos |= numericas_train.gt(tabla_estadisticas["Q3"] + 1.5 * iqr_numericas)
+    tabla_estadisticas["extremos_IQR_pct"] = 100 * extremos.mean()
+
+    pt.registrar_etapa("analisis_escala", train_actual, train_actual, trazabilidad_train)
+
+
+CELL 21 MARKDOWN
+<a id="seccion-decision-escala-12"></a>
+
+#### 5.4.2. Aplicación de la escala seleccionada
+
+Para `building_year` se aplica `(año − media de Train) / desviación estándar de Train`.
+Ambos parámetros se calculan exclusivamente con Train retenido; Test utiliza los mismos
+valores, sin reajustarlos. La desviación del escalador es poblacional (`ddof=0`).
+Las demás columnas conservan sus valores. La tabla breve siguiente muestra los parámetros
+utilizados en la única variable estandarizada.
+
+
+CELL 22 CODE
+with sesion.paso():
+    if trazabilidad_train[-1]["etapa"] != "analisis_escala":
+        raise ValueError("El escalado debe seguir al análisis vigente, sin reaplicaciones.")
+    pt.verificar_estado_analizado(pt.obtener_X(train_actual), origen_analisis_escala["huella_matriz"], columnas_evaluadas, filtro_final.named_steps["nombres"].roles_salida_)
+    pt.verificar_estado_analizado(X_train, origen_analisis_escala["huella_matriz"], columnas_evaluadas, filtro_final.named_steps["nombres"].roles_salida_)
+    columnas_estandarizar = ["building_year"] if "building_year" in columnas_evaluadas else []
+    columnas_normalizar = []
+    columnas_escala_original = [c for c in columnas_evaluadas
+                               if c not in columnas_estandarizar + columnas_normalizar]
+    razones_original = {
+        "total_area": "Coeficiente por m²; magnitud moderada y asimetría limitada.",
+        "living_area": "Coeficiente por m² de sala; conservar interpretación.",
+        "kitchen_area": "Coeficiente por m² de cocina; rango acotado.",
+        "rooms": "Conteo discreto; interpretar por habitación.",
+        "floor": "Conteo acotado; interpretar por piso, sin comprimir extremos.",
+        "total_floors": "Conteo acotado; mantener unidad de piso.",
+        "ceiling_height": "Conservar coeficiente por metro; OLS no exige Min-Max.",
+        "metro_distance_min": "Cola derecha; Min-Max comprimiría el centro. Mantener minutos.",
+        "to_center_km": "Asimetría elevada; escalar no la corrige. Mantener km.",
+        "metro_to_center_km": "Rango moderado; mantener km para interpretar.",
+        "mortgage_key_rate_at_listing": "Mantener interpretación por punto porcentual.",
+        "months_since_start": "Tendencia ya referida al inicio; coeficiente por mes.",
+        "secondary_mom_change_pct": "Unidad porcentual y magnitud moderada; no comprimir extremos.",
+    }
+    tabla_decisiones = pd.DataFrame([
+        {"variable": c, "transformacion": "StandardScaler" if c in columnas_estandarizar else "Original",
+         "justificacion": "Centrar el año respecto del intercepto y mejorar condición numérica."
+                           if c in columnas_estandarizar else razones_original[c]}
+        for c in columnas_evaluadas
+    ])
+    if (set(columnas_estandarizar) & set(columnas_normalizar)
+            or set(columnas_estandarizar + columnas_normalizar + columnas_escala_original) != set(columnas_evaluadas)):
+        raise ValueError("Los grupos de escalado no coinciden con las variables analizadas.")
+    if tabla_decisiones["variable"].tolist() != columnas_evaluadas:
+        raise ValueError("La tabla de decisiones pertenece a otro esquema.")
+    for indice, fila in tabla_decisiones.iterrows():
+        datos_variable = tabla_estadisticas.loc[fila["variable"]]
+        tabla_decisiones.loc[indice, "justificacion"] += (
+            f" Rango={datos_variable['rango']:.2f}; asimetría={datos_variable['asimetria']:.2f}.")
+
+    escalador = pt.EscaladoSelectivo(columnas_estandarizar, columnas_normalizar)
+    X_train_sin_escalar = X_train
+    X_train = escalador.fit_transform(X_train_sin_escalar)
+    if escalador.huella_entrada_train_ != origen_analisis_escala["huella_matriz"]:
+        raise ValueError("El escalador no se ajustó con la matriz analizada.")
+    if escalador.filas_ajuste_ != origen_analisis_escala["filas"]:
+        raise ValueError("El escalador utilizó otras observaciones.")
+    if escalador.estandarizador_ is not None:
+        if escalador.estandarizador_.feature_names_in_.tolist() != columnas_estandarizar:
+            raise ValueError("StandardScaler recibió variables distintas de las seleccionadas.")
+        np.testing.assert_allclose(escalador.estandarizador_.mean_, tabla_estadisticas.loc[columnas_estandarizar, "media"], rtol=1e-12)
+        np.testing.assert_allclose(escalador.estandarizador_.var_, X_train_sin_escalar[columnas_estandarizar].var(ddof=0), rtol=1e-12)
+    pt.validar_matriz(X_train, train_actual, columnas=columnas_modelo)
+    np.testing.assert_allclose(X_train[columnas_estandarizar].mean(), 0, atol=1e-10)
+    np.testing.assert_allclose(X_train[columnas_estandarizar].std(ddof=0), 1, atol=1e-10)
+    if columnas_normalizar:
+        assert X_train[columnas_normalizar].ge(-1e-12).all().all()
+        assert X_train[columnas_normalizar].le(1 + 1e-12).all().all()
+    columnas_conservadas = [c for c in X_train.columns if c not in columnas_estandarizar + columnas_normalizar]
+    pd.testing.assert_frame_equal(X_train[columnas_conservadas], X_train_sin_escalar[columnas_conservadas])
+    # Dos cifras de validación, sin agregar un análisis de modelos.
+    diseno_antes = np.column_stack([np.ones(len(X_train)), X_train_sin_escalar.to_numpy(dtype=float)])
+    diseno_despues = np.column_stack([np.ones(len(X_train)), X_train.to_numpy(dtype=float)])
+    condicion_antes = float(np.linalg.cond(diseno_antes))
+    condicion_despues = float(np.linalg.cond(diseno_despues))
+    contrato_transformacion["escalado"] = {
+        **pt.registro_escalado(escalador), "numericas_escala_original": columnas_escala_original,
+        "condicion_train_con_intercepto_antes": condicion_antes,
+        "condicion_train_con_intercepto_despues": condicion_despues,
+        "desviacion_tabla_descriptiva_ddof": 1,
+    }
+    display(pd.DataFrame({
+        "Variable": columnas_estandarizar,
+        "Media de Train": escalador.estandarizador_.mean_ if columnas_estandarizar else [],
+        "Desviación estándar de Train": escalador.estandarizador_.scale_ if columnas_estandarizar else [],
+    }))
+    del X_train_sin_escalar, diseno_antes, diseno_despues
+
+    anterior = train_actual
+    train_actual = pt.reemplazar_X(train_actual, X_train)
+    pt.registrar_etapa("escalado", anterior, train_actual, trazabilidad_train)
+    pt.validar_superficies(train_actual, exigir_columnas=False)
+
+
+        Variable  Media de Train  Desviación estándar de Train
+0  building_year     1987.192923                     22.580384
+
+CELL 23 CODE
+with sesion.paso():
+    pt.validar_matriz(pt.obtener_X(train_actual), train_actual)
+    pd.testing.assert_frame_equal(train_actual[[*pt.AUXILIARES, pt.OBJETIVO]],
+                                  train_crudo.loc[train_actual.index, [*pt.AUXILIARES, pt.OBJETIVO]])
+    objetos_transformacion = {
+        "preparacion": preparador, "base": codificador_base, "district": codificador_district,
+        "extraccion": extractor_temporal, "filtro": filtro_final, "escalado": escalador,
+        "columnas_X": columnas_modelo,
+    }
+    nominal = codificador_base.named_transformers_["cat"]
+    distrito = codificador_district.named_steps["onehot"]
+    contrato_transformacion.update({
+        "convencion_nombres": "snake_case_ascii_v1",
+        "correspondencia_nombres": filtro_final.named_steps["nombres"].correspondencia_,
+        "roles_predictoras": {c: filtro_final.named_steps["nombres"].roles_salida_[c] for c in columnas_modelo},
+        "orden_train": [r["etapa"] for r in trazabilidad_train], "particion": contrato_particion,
+        "excluidas_modelado": pt.EXCLUIDAS_MODELO, "columnas_X": columnas_modelo,
+        "entradas_seleccionadas": pt.ENTRADAS_X,
+        "momento_ajuste_imputacion": "Train seleccionado completo, antes de Tukey",
+        "medianas_train": dict(zip(pt.NUMERICAS, preparador.numerico_.statistics_.tolist())),
+        "medias_train_mom": dict(zip(pt.CAMBIOS_MENSUALES, preparador.mensual_.statistics_.tolist())),
+        "modas_binarias_train": dict(zip(pt.BINARIAS, preparador.binario_.statistics_.tolist())),
+        "mapas_binarios": pt.MAPAS_BINARIOS,
+        "categorias_train": {c: v.tolist() for c,v in zip(pt.CATEGORICAS, nominal.categories_)},
+        "categorias_district_train": distrito.categories_[0].tolist(),
+        "referencia_district": str(distrito.categories_[0][int(distrito.drop_idx_[0])]),
+        "origen_mes_train": extractor_temporal.origen_mes_,
+        "tratamiento_objetivo": resumen_tukey, "auditoria_train": resumen_calidad_train,
+        "versiones": {p: version(p) for p in ["numpy","pandas","scikit-learn","scipy","joblib"]},
+        "modulo_sha256": pt.huella_archivo(SCRIPTS_DIR / "preparacion_train_test.py"),
+    })
+    # Objetos de Train para Test; el paquete definitivo se guarda en la exportación.
+    objetos_guardados = objetos_transformacion
+    huella_antes_test = joblib.hash(objetos_guardados)
+
+
+CELL 24 MARKDOWN
+<a id="seccion-test-final-14"></a>
+
+## 6. Aplicación de las transformaciones a Test
+
+Test ya se separó cronológicamente al inicio: contiene las observaciones más recientes.
+Transformarlo significa aplicar exactamente las reglas definidas con Train:
+
+1. Seleccionar las mismas variables predictoras.
+2. Corregir inconsistencias e imputar con los parámetros aprendidos en Train.
+3. Aplicar los mapas binarios 0/1 y los codificadores categóricos de Train.
+4. Generar las mismas características temporales.
+5. Normalizar nombres y aplicar los filtros de constantes y duplicadas definidos con Train.
+6. Aplicar el mismo escalado y sus parámetros.
+
+**No se ejecuta `fit` sobre Test** ni se recalculan medias, medianas, modas o escalas.
+Tampoco se aplica Tukey: se conservan todos sus anuncios, incluidos los precios extremos,
+y `price_rub` permanece intacto. Al finalizar, ambos conjuntos deben tener las mismas
+predictoras en idéntico orden. La tabla siguiente presenta sus dimensiones finales.
+
+
+CELL 25 CODE
+with sesion.paso():
+    with warnings.catch_warnings(record=True) as avisos_test:
+        warnings.simplefilter("always", UserWarning)
+        test_actual, resumen_calidad_test, auditoria_test, trazabilidad_test = pt.aplicar_flujo(_test_reservado, objetos_guardados)
+    if joblib.hash(objetos_guardados) != huella_antes_test:
+        raise ValueError("Test modificó los parámetros de Train.")
+    if len(test_actual) != len(_test_reservado):
+        raise ValueError("Test perdió anuncios.")
+    pt.validar_matriz(pt.obtener_X(test_actual), test_actual, columnas=columnas_modelo)
+    pd.testing.assert_frame_equal(
+        test_actual[[*pt.AUXILIARES, pt.OBJETIVO]],
+        _test_reservado[[*pt.AUXILIARES, pt.OBJETIVO]])
+    display(pd.DataFrame([
+        {"Conjunto": "Train", "Observaciones": len(train_actual), "Predictoras": pt.obtener_X(train_actual).shape[1]},
+        {"Conjunto": "Test", "Observaciones": len(test_actual), "Predictoras": pt.obtener_X(test_actual).shape[1]},
+    ]))
+
+
+  Conjunto  Observaciones  Predictoras
+0    Train          37984          177
+1     Test          10002          177
+
+CELL 26 MARKDOWN
+<a id="seccion-exportacion-final-15"></a>
+
+## 7. Exportación de datasets transformados y persistencia de transformadores
+
+Se exportan `train_actual` y `test_actual` con todas las transformaciones acumuladas, sin reconstruirlos ni volver a procesarlos.
+La validación recarga ambos CSV desde `data/`, verifica el contrato y prueba `cargar_train()`, utilizado por `3_Modelo_OLS.ipynb`.
+`price_rub` se conserva como respuesta; `id`, `date_posted_dt` y `dataset_split` son auxiliares y quedan fuera de X.
+Los transformadores y metadatos se conservan para su registro en MLflow, sin mostrar la auditoría técnica.
+
+
+CELL 27 CODE
+with sesion.paso():
+    salida_final = DATOS_PROYECTO
+    manifiesto_exportacion = pt.exportar_entrega_final(
+        train_actual, test_actual, train_crudo, _test_reservado,
+        objetos_guardados, contrato_transformacion, salida_final, carpeta_artefactos=artefactos,
+    )
+    # Metadatos y evidencia de escala en segundo plano, destinados a MLflow.
+    pt.guardar_json(artefactos / "contrato_transformacion.json", contrato_transformacion)
+    tabla_estadisticas.to_csv(artefactos / "train_estadisticas_numericas.csv", index_label="variable")
+    tabla_decisiones.to_csv(artefactos / "train_decisiones_escalado.csv", index=False)
+
+    resumen_exportacion = pt.validar_entrega_para_ols(train_actual, test_actual, salida_final)
+    display(resumen_exportacion)
+    if resumen_exportacion.attrs["errores"]:
+        raise ValueError("Exportación incompatible: " + "; ".join(resumen_exportacion.attrs["errores"]))
+    from IPython.display import Markdown
+    display(Markdown(
+        "Ambos CSV contienen las transformaciones definitivas y están validados contra el contrato de datos.\n"
+        "Train puede cargarse directamente para ajustar y seleccionar modelos OLS, sin nuevo preprocesamiento.\n"
+        "Test conserva todas sus observaciones y se reserva exclusivamente para la evaluación final."))
+
+
+        Archivo exportado  Observaciones  ...  Columnas totales    Estado
+0  train_transformado.csv          37984  ...               181  Correcto
+1   test_transformado.csv          10002  ...               181  Correcto
+
+[2 rows x 5 columns]
+
+Ambos CSV contienen las transformaciones definitivas y están validados contra el contrato de datos.
+Train puede cargarse directamente para ajustar y seleccionar modelos OLS, sin nuevo preprocesamiento.
+Test conserva todas sus observaciones y se reserva exclusivamente para la evaluación final.
+
+CELL 28 MARKDOWN
+<a id="seccion-resumen-final-16"></a>
+
+## 8. Resumen final de transformaciones y características del dataset
+
+Las dos tablas siguientes sintetizan las operaciones y los resultados de la ejecución.
+Se obtienen de los datos exportados y de los transformadores utilizados, sin modificar datos.
+Las columnas numéricas, binarias y One-Hot se contabilizan en grupos disjuntos: cada predictora
+se cuenta una sola vez. La documentación técnica completa se conserva en segundo plano para MLflow.
+
+
+CELL 29 CODE
+with sesion.paso():
+    from IPython.display import Markdown
+    from scripts import resumen_transformacion as rt
+    rt = importlib.reload(rt)
+    estructura_notebook = __import__("json").loads(
+        (carpeta_notebook / "2_Transformacion_PropUsadas.ipynb").read_text(encoding="utf-8"))
+    if not all(c.get("metadata", {}).get("resumen_final_transformacion")
+               for c in estructura_notebook["cells"][-2:]):
+        raise ValueError("Actualizar el índice: el resumen debe permanecer al final absoluto.")
+    resumen_final = rt.generar_resumen(salida_final, train_crudo, _test_reservado,
+        manifiesto=manifiesto_exportacion, objetos=dict(objetos_guardados, configuracion=contrato_transformacion))
+    rt.guardar_resumen(resumen_final, artefactos / "resumen_final.json")
+    linaje_final = resumen_final["linaje"]
+    conteos_finales = {tipo: sum(d["tipo"] == tipo for d in linaje_final.values())
+                      for tipo in ("numerica", "binaria", "onehot")}
+    assert sum(conteos_finales.values()) == len(columnas_modelo)
+    excluidas_iniciales = [v for v in train_crudo.columns
+        if pt.ALIAS_HIPOTECARIO.get(v, v) not in set(pt.ENTRADAS_X + pt.AUXILIARES + [pt.OBJETIVO])]
+    constantes = filtro_final.named_steps["constantes"]
+    duplicadas = filtro_final.named_steps["duplicadas"].duplicadas_
+    meses_finales = [col for grupo in resumen_final["categorias"]
+        if grupo["variable"] in extractor_temporal.mes_.feature_names_in_
+        for col in grupo["columnas"] if col in columnas_modelo]
+    estandarizadas = resumen_final["escalado"]["estandarizadas"]
+    numericas_originales = [col for col, info in linaje_final.items()
+        if info["tipo"] == "numerica" and col not in estandarizadas + resumen_final["escalado"]["normalizadas"]]
+    resumen_transformaciones = pd.DataFrame([
+        ("Feature Selection inicial", f"{len(excluidas_iniciales)} columnas excluidas según el apartado 2."),
+        ("Preparación de datos", f"Corrección de superficies y dominio; {resumen_calidad_train['superficies_corregidas']} señales de corrección de total_area en Train. Imputación con Train."),
+        ("Outliers", f"Tukey elimina {resumen_tukey['outliers_eliminados']} anuncios de Train; Test se conserva completo."),
+        ("Feature Transformation", f"One-Hot para {len(preparador.categorico_.feature_names_in_)} categóricas y mapas 0/1 para {len(preparador.binario_.feature_names_in_)} binarias."),
+        ("Feature Extraction", f"months_since_start y {len(meses_finales)} columnas month_of_year_* para tendencia y posibles efectos estacionales."),
+        ("Feature Selection final", f"Nombres normalizados; {int((~constantes.get_support()).sum())} constantes y {len(duplicadas)} duplicadas eliminadas."),
+        ("Escalado", f"StandardScaler: {', '.join(estandarizadas) or 'ninguna'}. Otras {len(numericas_originales)} numéricas en escala original; Min-Max: {len(resumen_final['escalado']['normalizadas'])}."),
+    ], columns=["Etapa", "Resultado"])
+    caracteristicas_finales = pd.DataFrame([
+        ("Observaciones finales de Train", manifiesto_exportacion["train"]["filas"]),
+        ("Observaciones finales de Test", manifiesto_exportacion["test"]["filas"]),
+        ("Predictoras finales", len(columnas_modelo)),
+        ("Numéricas (sin binarias ni One-Hot)", conteos_finales["numerica"]),
+        ("Binarias (incluye indicadores; sin One-Hot)", conteos_finales["binaria"]),
+        ("Columnas One-Hot", conteos_finales["onehot"]),
+        ("Variable objetivo", pt.OBJETIVO),
+    ], columns=["Característica", "Resultado"])
+    display(Markdown("**Parte A — Resumen de transformaciones**"))
+    display(resumen_transformaciones)
+    display(Markdown("**Parte B — Características finales de los datasets**"))
+    display(caracteristicas_finales)
+    display(Markdown(
+        "Los datasets quedan preparados para regresión y selección de características.\n"
+        "El entrenamiento y la selección mediante OLS, Best Subset y Stepwise se realizan dentro de Train.\n"
+        "Test permanece reservado para la evaluación final, con las reglas aprendidas en Train."))
+
+    from scripts import baseline_ols as b
+    cliente = b.conectar(raiz)
+    registrar_archivos(cliente, RUN_TRANSFORMACION, artefactos,
+        "transformacion/" + manifiesto_exportacion["train"]["sha256"] + "/" + manifiesto_exportacion["modulo_sha256"],
+        fuentes=[SCRIPTS_DIR / nombre for nombre in ("__init__.py", "contrato_datasets.py", "preparacion_train_test.py",
+            "resumen_transformacion.py", "almacenamiento_mlflow.py")])
+    sesion.cerrar()
+
+
+**Parte A — Resumen de transformaciones**
+
+                       Etapa                                          Resultado
+0  Feature Selection inicial         17 columnas excluidas según el apartado 2.
+1       Preparación de datos  Corrección de superficies y dominio; 186 señal...
+2                   Outliers  Tukey elimina 2014 anuncios de Train; Test se ...
+3     Feature Transformation  One-Hot para 4 categóricas y mapas 0/1 para 3 ...
+4         Feature Extraction  months_since_start y 11 columnas month_of_year...
+5    Feature Selection final  Nombres normalizados; 0 constantes y 1 duplica...
+6                   Escalado  StandardScaler: building_year. Otras 13 numéri...
+
+**Parte B — Características finales de los datasets**
+
+                                Característica  Resultado
+0               Observaciones finales de Train      37984
+1                Observaciones finales de Test      10002
+2                          Predictoras finales        177
+3          Numéricas (sin binarias ni One-Hot)         14
+4  Binarias (incluye indicadores; sin One-Hot)          5
+5                             Columnas One-Hot        158
+6                            Variable objetivo  price_rub
+
+Los datasets quedan preparados para regresión y selección de características.
+El entrenamiento y la selección mediante OLS, Best Subset y Stepwise se realizan dentro de Train.
+Test permanece reservado para la evaluación final, con las reglas aprendidas en Train.

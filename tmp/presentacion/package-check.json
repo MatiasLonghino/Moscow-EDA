@@ -1,0 +1,67 @@
+{
+  "chart_count": 6,
+  "claim_boundary": "Structural package checks only; no slide text, notes, formulas, chart values, or native PowerPoint execution were inspected.",
+  "finding_count": 14,
+  "findings": [
+    {
+      "code": "content_type_target_missing",
+      "part": "ppt/slideMasters/slideMaster2.xml"
+    },
+    {
+      "code": "content_type_target_missing",
+      "part": "ppt/slideMasters/slideMaster3.xml"
+    },
+    {
+      "code": "content_type_target_missing",
+      "part": "ppt/slideMasters/slideMaster4.xml"
+    },
+    {
+      "code": "content_type_target_missing",
+      "part": "ppt/slideMasters/slideMaster5.xml"
+    },
+    {
+      "code": "content_type_target_missing",
+      "part": "ppt/slideMasters/slideMaster6.xml"
+    },
+    {
+      "code": "content_type_target_missing",
+      "part": "ppt/slideMasters/slideMaster7.xml"
+    },
+    {
+      "code": "content_type_target_missing",
+      "part": "ppt/slideMasters/slideMaster8.xml"
+    },
+    {
+      "code": "content_type_target_missing",
+      "part": "ppt/slideMasters/slideMaster9.xml"
+    },
+    {
+      "code": "content_type_target_missing",
+      "part": "ppt/slideMasters/slideMaster10.xml"
+    },
+    {
+      "code": "content_type_target_missing",
+      "part": "ppt/slideMasters/slideMaster11.xml"
+    },
+    {
+      "code": "content_type_target_missing",
+      "part": "ppt/slideMasters/slideMaster12.xml"
+    },
+    {
+      "code": "content_type_target_missing",
+      "part": "ppt/slideMasters/slideMaster13.xml"
+    },
+    {
+      "code": "content_type_target_missing",
+      "part": "ppt/slideMasters/slideMaster14.xml"
+    },
+    {
+      "code": "content_type_target_missing",
+      "part": "ppt/slideMasters/slideMaster15.xml"
+    }
+  ],
+  "notes_parts_skipped": 15,
+  "relationship_part_count": 41,
+  "slide_count": 15,
+  "status": "fail"
+}

@@ -1,0 +1,26 @@
+{
+  "finding_count": 0,
+  "findings": [],
+  "slide_count": 15,
+  "slide_size_in": [
+    13.3333,
+    7.5
+  ],
+  "warning_count": 1,
+  "warnings": [
+    {
+      "available_bottom_in": 6.07,
+      "columns": 6,
+      "declared_bottom_in": 5.45,
+      "estimated_native_bottom_in": 6.6667,
+      "footer_object_ids": [
+        "7"
+      ],
+      "kind": "native_table_overflow",
+      "overflow_in": 0.5967,
+      "rows": 15,
+      "slide": 9,
+      "table_id": "10"
+    }
+  ]
+}
