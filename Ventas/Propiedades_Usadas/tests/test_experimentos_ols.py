@@ -7,7 +7,7 @@ from pathlib import Path
 import pandas as pd
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from experimentos_ols import crear_preprocesador, tabla_markdown, validacion_temporal
+from scripts.experimentos_ols import crear_preprocesador, tabla_markdown, validacion_temporal
 
 
 class PreparacionOLS(unittest.TestCase):
