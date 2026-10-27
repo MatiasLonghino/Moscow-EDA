@@ -17,8 +17,134 @@ from threadpoolctl import threadpool_limits
 from . import baseline_ols as b
 from . import seleccion_modelos as s
 NOMBRE_RUN = 'GroupLasso_02_Log_Grupos_OLS'
+NOMBRE_RUN_177 = 'GroupLasso_05_Log_177_Grupos_OLS'
 CONFIG = {'min_mejora_pct': .5, 'max_features': 12, 'support_tol': 1e-6,
           'solver_tol': 1e-7, 'max_iter': 20000, 'n_lambdas': 40, 'lambda_min_ratio': .001}
+
+
+def parametros_177(datos, referencia):
+    return dict(n_candidate_predictors=177, n_candidate_groups=len(datos['grupos']),
+        candidate_columns=json.dumps(list(datos['X'])), excluded_predictors='',
+        reference_run_name=s.NOMBRE_RUN_177, reference_run_id=referencia['run']['run_id'],
+        n_lambdas=40, lambda_min_ratio=.001, permutation_repeats=10)
+
+
+def validar_referencia_177(datos, referencia):
+    """El Forward real de 177 debe estar terminado y compartir universo y partición."""
+    if referencia is None or referencia.get('metodo') != 'forward':
+        raise ValueError('Group Lasso 177 requiere Forward_04_Log_177_Grupos terminado.')
+    s._validar_resultado_presentacion(datos, referencia)
+    for k, v in s._parametros_forward_177(datos).items():
+        if referencia['run']['params'].get(k) != str(v):
+            raise ValueError(f'Referencia Forward 177 incompatible ({k}).')
+    s._validar_forward_177(datos, referencia)
+    remoto = s.recuperar_experimento(datos['cliente'], nombre=s.NOMBRE_RUN_177,
+        run_id=referencia['run']['run_id'], parametros=s._parametros_forward_177(datos),
+        etiquetas={'dataset_sha256': datos['contexto']['dataset_sha256']})
+    assert remoto['params'] == referencia['run']['params'] and remoto['metrics'] == referencia['run']['metrics']
+
+
+def diagnostico_gram(gram, bloques, columnas):
+    """Audita el diseño sin modificarlo ni ajustar el umbral histórico de rango."""
+    valores, vectores = np.linalg.eigh(gram)
+    rango = int(np.linalg.matrix_rank(gram, tol=1e-10))
+    return dict(n_columnas=len(columnas), rango_gram=rango, tolerancia_rango=1e-10,
+        autovalor_min=float(valores[0]), autovalor_max=float(valores[-1]),
+        condicion_gram=float(valores[-1]/valores[0]) if valores[0] > 0 else None,
+        rangos_grupos=[int(np.linalg.matrix_rank(gram[np.ix_(i, i)], tol=1e-10)) for i in bloques],
+        direccion_menos_estable={columnas[i]: float(vectores[i, 0])
+            for i in np.argsort(abs(vectores[:, 0]))[-8:][::-1]},
+        advertencias=[] if rango == len(columnas) else
+            ['Gram de rango deficiente; no excluir columnas ni continuar con resultados incompletos.'])
+
+
+def validar_recuperacion_177(datos, resultado):
+    """Audita escalador, 40 soluciones KKT, bloques y decisiones; no reentrena."""
+    sel, out = resultado['seleccion'], resultado['salida']
+    X, y, grupos, fit = datos['X'], datos['y'], datos['grupos'], datos['fit']
+    assert resultado['contexto']['universo_predictoras'] == list(X)
+    assert resultado['contexto']['n_predictoras_inicial'] == X.shape[1] == 177
+    scaler = joblib.load(out/'scaler_seleccion.joblib')
+    assert list(scaler.feature_names_in_) == list(X) and scaler.n_samples_seen_ == len(fit)
+    np.testing.assert_allclose(scaler.mean_, X.iloc[fit].mean(), rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(scaler.var_, X.iloc[fit].var(ddof=0), rtol=1e-12, atol=1e-12)
+    with np.load(out/'ruta_coeficientes_group_lasso.npz') as ruta:
+        assert ruta['columnas'].tolist() == list(X)
+        coef, ids = ruta['coeficientes'].copy(), ruta['group_ids'].copy()
+        np.testing.assert_array_equal(ruta['lambdas'], sel['lambdas'])
+    nombres = list(grupos)
+    posiciones = {c: i for i, c in enumerate(X)}
+    bloques = [np.array([posiciones[c] for c in grupos[g]]) for g in nombres]
+    for i, bloque in enumerate(bloques):
+        assert (ids[bloque] == i).all()
+    assert coef.shape == (40, 177) and np.isfinite(coef).all()
+    assert len(sel['historial']) == len(sel['lambdas']) == 40 and sel['config'] == CONFIG
+    candidatos, cache = [], {}
+    with threadpool_limits(limits=1):
+        Z = scaler.transform(X.iloc[fit])
+        yc = np.log(y.iloc[fit]).to_numpy()-np.log(y.iloc[fit]).mean()
+        gram, xy = Z.T@Z/len(fit), Z.T@yc/len(fit)
+        diag = diagnostico_gram(gram, bloques, list(X))
+        meta = json.loads((out/'estabilidad_numerica.json').read_text(encoding='utf-8'))
+        assert diag['rango_gram'] == meta['rango_gram'] == 177
+        assert diag['rangos_grupos'] == meta['rangos_grupos'] == [len(i) for i in bloques]
+        np.testing.assert_allclose([meta[k] for k in ('autovalor_min', 'autovalor_max', 'condicion_gram')],
+            [diag[k] for k in ('autovalor_min', 'autovalor_max', 'condicion_gram')], rtol=1e-10)
+        pesos = np.sqrt(diag['rangos_grupos'])
+        for g, r, w in zip(nombres, diag['rangos_grupos'], pesos):
+            assert sel['ponderacion'][g] == dict(p_g=r, peso=float(w))
+        np.testing.assert_allclose(sel['lambda_max'], max(np.linalg.norm(xy[i])/w for i, w in zip(bloques, pesos)))
+        L = float(np.linalg.eigvalsh(gram)[-1])
+        escala = max(float(np.linalg.norm(xy, ord=np.inf)), 1e-12)
+        for lam, beta, paso in zip(sel['lambdas'], coef, sel['historial']):
+            normas = [float(np.linalg.norm(beta[i])) for i in bloques]
+            activas = [g for g, norma in zip(nombres, normas) if norma > CONFIG['support_tol']]
+            assert paso['lambda'] == lam and paso['seleccionadas'] == activas
+            np.testing.assert_allclose(list(paso['normas_grupos'].values()), normas, rtol=1e-12, atol=1e-14)
+            assert paso['n_caracteristicas'] == len(activas)
+            assert paso['n_predictores'] == len(s.columnas_grupos(grupos, activas))
+            valido = 0 < len(activas) <= 12
+            assert paso['valido'] == valido and paso['convergencia']
+            assert paso['motivo'] == ('evaluado' if valido else 'solo_intercepto' if not activas else 'max_features')
+            assert 1 <= paso['iteraciones_solver'] <= CONFIG['max_iter']
+            v = beta-(gram@beta-xy)/L
+            n = np.sqrt(np.bincount(ids, weights=v*v, minlength=len(pesos)))
+            prox = v*np.maximum(0., 1-lam*pesos/L/np.maximum(n, np.finfo(float).tiny))[ids]
+            residuo = float(L*np.linalg.norm(beta-prox, ord=np.inf))
+            assert residuo <= CONFIG['solver_tol']*escala*(1+1e-8)
+            np.testing.assert_allclose(paso['residuo_kkt'], residuo, rtol=1e-7, atol=1e-14)
+            np.testing.assert_allclose(paso['residuo_kkt_relativo'], residuo/escala, rtol=1e-7, atol=1e-14)
+            if valido:
+                score = paso['rmse_validation_original']
+                assert np.isfinite(score)
+                clave = tuple(activas)
+                if clave in cache:
+                    assert cache[clave] == score
+                cache[clave] = score
+                candidatos.append(dict(seleccionadas=activas, **{'lambda': lam}, rmse_validation_original=score))
+            else:
+                assert paso['rmse_validation_original'] is None
+    real = y.iloc[datos['val']].to_numpy()
+    basal = float(np.sqrt(np.mean((real-np.exp(np.log(y.iloc[fit]).mean()))**2)))
+    np.testing.assert_allclose(sel['rmse_intercepto_original'], basal, rtol=1e-12)
+    np.testing.assert_allclose(sel['target_mean_fit'], np.log(y.iloc[fit]).mean(), rtol=1e-12)
+    assert sel['ols_provisionales_unicos'] == len(cache)
+    ganador, decisiones = elegir_por_complejidad(candidatos, sel['rmse_intercepto_original'])
+    assert decisiones == sel['decisiones_complejidad']
+    assert ganador['seleccionadas'] == sel['seleccionadas'] and ganador['lambda'] == sel['lambda']
+    assert ganador['rmse_validation_original'] == sel['rmse_validation_original']
+
+
+def resumen_numerico_presentacion(resultado):
+    sel = resultado['seleccion']
+    meta = json.loads((resultado['salida']/'estabilidad_numerica.json').read_text(encoding='utf-8'))
+    return (f"Universo: 177 columnas / {len(resultado['grupos'])} grupos; Gram de rango "
+        f"{meta['rango_gram']}/177, condición {meta['condicion_gram']:.1f}. "
+        f"Se evaluaron las 40 lambdas: {sum(h['n_caracteristicas'] > 12 for h in sel['historial'])} "
+        f"configuraciones con más de 12 grupos se conservaron como no elegibles. "
+        f"Todas convergieron; máximo residuo KKT relativo "
+        f"{max(h['residuo_kkt_relativo'] for h in sel['historial']):.2e} (tolerancia 1e-7). "
+        "No se excluyeron columnas ni se modificaron hiperparámetros; el OLS definitivo usa las escalas exportadas.")
 
 
 def resolver_group_lasso(gram, xy, ids, pesos, lam, *, inicial=None, tol=1e-7, max_iter=20000):
@@ -95,6 +221,8 @@ def buscar_group_lasso(X, y, grupos, fit, val, salida, *, lambdas=None, config=N
     with threadpool_limits(limits=1):
         gram, xy = Z.T@Z/len(fit), Z.T@yc/len(fit)
         rangos = [int(np.linalg.matrix_rank(gram[np.ix_(i, i)], tol=1e-10)) for i in bloques]
+        if not excluidas:
+            b.guardar_json(out/'estabilidad_numerica.json', diagnostico_gram(gram, bloques, list(X)))
         assert all(r == len(i) for r, i in zip(rangos, bloques)), 'Grupo interno no identificable.'
         assert np.linalg.matrix_rank(gram, tol=1e-10) == X.shape[1], 'Diseño interno no identificable.'
         pesos = np.sqrt(rangos)
@@ -169,6 +297,8 @@ def entrenar_exportar(base, X, y, grupos, seleccion, contexto_train, referencia,
         'transformacion_objetivo': 'ln', 'unidad': 'ln(RUB)', 'predictoras_excluidas': list(excluidas),
         'seleccion_caracteristicas': 'group_lasso_then_ols', 'reference_run_id': referencia['run_id'],
         'caracteristicas_originales': seleccion['seleccionadas']}
+    if not excluidas:
+        contexto.update(universo_predictoras=list(X), n_predictoras_inicial=X.shape[1])
     out = b.exportar(base, modelo, diseno, np.log(y), contexto, metricas, invalidas, vif, notas,
                      nombre_run=nombre_run, carpeta_salida=salida)
     tabla = s.tabla_comparativa(referencia['metrics'], metricas, invalidas,
@@ -198,6 +328,12 @@ def registrar(cliente, resultado, seleccion, referencia, *, nombre_run=NOMBRE_RU
         'experiment_id': referencia['experiment_id'], 'notebook': '4_Seleccion_Modelos.ipynb',
         'validation_fraction': .2, 'random_state': referencia['params']['random_state'], 'permutation_repeats': 10,
         'selection_stop_reason': seleccion['motivo_parada']}
+    if resultado['contexto'].get('n_predictoras_inicial') == 177:
+        assert referencia['run_name'] == s.NOMBRE_RUN_177 and cfg == CONFIG
+        params.update(n_candidate_predictors=177,
+            n_candidate_groups=len(json.loads((resultado['salida']/'grupos_caracteristicas.json').read_text(encoding='utf-8'))),
+            candidate_columns=json.dumps(resultado['contexto']['universo_predictoras']),
+            excluded_predictors='', n_lambdas=40, lambda_min_ratio=.001)
     b.guardar_json(resultado['salida']/'configuracion.json', params)
     registro = b.registrar(cliente, resultado['salida'], resultado['contexto'], resultado['metricas'],
                            nombre_run=nombre_run, parametros_extra=params)

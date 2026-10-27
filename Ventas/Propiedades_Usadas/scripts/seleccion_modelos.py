@@ -181,19 +181,29 @@ def ejecutar_presentacion(datos, metodo, *, modo='recuperar', anterior=None, nom
         if datos['excluidas'] or datos['X'].shape[1] != 177 or datos['config_forward'] != bw.CONFIG:
             raise ValueError('Backward requiere 177 columnas, exclusiones vacías y configuración fija.')
     forward_177 = metodo == 'forward' and datos['excluidas'] == ()
+    lasso_177 = metodo == 'lasso' and datos['excluidas'] == ()
     if forward_177 and (datos['X'].shape[1] != 177 or datos['config_forward'] != CONFIG_FORWARD):
         raise ValueError('Forward 177 requiere 177 columnas y configuración fija 80/20, semilla 42, 12 grupos y 0,5 %.')
+    if lasso_177 and (datos['X'].shape[1] != 177 or datos['config_lasso'] != gl.CONFIG
+                      or datos['config_forward'] != CONFIG_FORWARD):
+        raise ValueError('Group Lasso 177 requiere el universo y las configuraciones históricas exactas.')
     nombre = nombre_run or {'forward': NOMBRE_RUN, 'lasso': gl.NOMBRE_RUN, 'backward': bw.NOMBRE_RUN}[metodo]
     if forward_177 and nombre_run is None:
         nombre = NOMBRE_RUN_177
+    if lasso_177 and nombre_run is None:
+        nombre = gl.NOMBRE_RUN_177
     if "'" in nombre or not nombre.strip():
         raise ValueError('Nombre de Run inválido.')
-    if metodo == 'lasso' and (modo == 'nuevo' or anterior is not None):
+    if lasso_177:
+        gl.validar_referencia_177(datos, anterior)
+    elif metodo == 'lasso' and (modo == 'nuevo' or anterior is not None):
         if anterior is None or anterior.get('metodo') != 'forward':
             raise ValueError('Group Lasso requiere la referencia Forward de esta comparación.')
         _validar_resultado_presentacion(datos, anterior)
     cliente, sesion = datos['cliente'], datos['sesion']
-    out = sesion.carpeta('presentacion_forward_177' if forward_177 else 'presentacion_'+metodo)
+    carpeta = ('presentacion_forward_177' if forward_177 else
+               'presentacion_lasso_177' if lasso_177 else 'presentacion_'+metodo)
+    out = sesion.carpeta(carpeta)
     if modo == 'nuevo':
         exp = cliente.get_experiment_by_name(b.EXPERIMENTO)
         if exp is None or exp.lifecycle_stage != 'active':
@@ -235,6 +245,10 @@ def ejecutar_presentacion(datos, metodo, *, modo='recuperar', anterior=None, nom
         for k, v in _parametros_forward_177(datos).items():
             if run['params'].get(k) != str(v):
                 raise ValueError(f'Run Forward 177 incompatible ({k}).')
+    if lasso_177:
+        for k, v in gl.parametros_177(datos, anterior).items():
+            if run['params'].get(k) != str(v):
+                raise ValueError(f'Run Group Lasso 177 incompatible ({k}).')
     if metodo == 'backward':
         for k, esperado in dict(algorithm_version=bw.VERSION, n_candidate_predictors='177',
                                reference_run_name=bw.REFERENCIA, permutation_repeats='10').items():
@@ -244,6 +258,8 @@ def ejecutar_presentacion(datos, metodo, *, modo='recuperar', anterior=None, nom
             raise ValueError('Universo Backward incompatible.')
     nombres = ['contexto.json', 'seleccion.json', 'metricas.json', 'grupos_caracteristicas.json',
                'particion_interna.npz', 'modelo_statsmodels.pkl', 'inferencia.json']
+    if lasso_177:
+        nombres += ['scaler_seleccion.joblib', 'ruta_coeficientes_group_lasso.npz', 'estabilidad_numerica.json']
     for archivo in nombres:
         cliente.download_artifacts(run['run_id'], archivo, str(out))
     leer = lambda nombre: json.loads((out/nombre).read_text(encoding='utf-8'))
@@ -259,6 +275,8 @@ def ejecutar_presentacion(datos, metodo, *, modo='recuperar', anterior=None, nom
         bw.validar_recuperacion(datos, r)
     if forward_177:
         _validar_forward_177(datos, r)
+    if lasso_177:
+        gl.validar_recuperacion_177(datos, r)
     assert leer('inferencia.json')['columnas_diseno'] == r['modelo'].model.exog_names
     if metodo == 'lasso':
         if anterior is None or run['params']['reference_run_id'] != anterior['run']['run_id']:
@@ -294,13 +312,15 @@ def ejecutar_presentacion(datos, metodo, *, modo='recuperar', anterior=None, nom
         100*(importancia.rmse_permutado-importancia.rmse_original)/importancia.rmse_original, rtol=1e-10, atol=1e-10)
     r['importancias'] = importancia
     r['caracteristicas_md'] = resumen_caracteristicas(r['seleccion']['seleccionadas'], grupos, r['modelo'], mostrar_orden=forward_177)
-    if metodo == 'backward' or forward_177:
+    if metodo == 'backward' or forward_177 or lasso_177:
         filas = [{'Característica original': g, 'Columna transformada': c,
                   'Coeficiente OLS [ln(RUB)]': float(r['modelo'].params[c])}
                  for g in r['seleccion']['seleccionadas'] for c in grupos[g]]
         r['caracteristicas_md'] += '\n\n'+b.tabla_markdown(pd.DataFrame(filas))
     if forward_177:
         r['etiqueta'] = 'Forward Stepwise Selection — 177 predictoras'
+    if lasso_177:
+        r['etiqueta'] = 'Group Lasso + OLS — 177 predictoras'
     if modo == 'nuevo':
         (out/'caracteristicas_seleccionadas.md').write_text(r['caracteristicas_md'], encoding='utf-8')
         registrar_presentacion(cliente, run, out, ['caracteristicas_seleccionadas.md',
@@ -326,7 +346,7 @@ def tabla_metricas_presentacion(resultado, anterior=None):
         fila = {'Evaluación': evaluacion, 'Métrica': etiqueta}
         if anterior:
             previo = anterior['metricas'].get(clave)
-            fila['Forward'] = b._formato_presentacion(previo) if previo is not None else 'N/D'
+            fila[anterior.get('etiqueta', 'Forward')] = b._formato_presentacion(previo) if previo is not None else 'N/D'
         etiqueta_modelo = resultado.get('etiqueta') or ('Backward Selection' if resultado.get('metodo') == 'backward'
                           else 'Group Lasso + OLS' if anterior else 'Forward')
         fila[etiqueta_modelo] = b._formato_presentacion(nuevo) if nuevo is not None else 'N/D'
@@ -367,7 +387,7 @@ def confirmacion_presentacion(resultado):
     return f"{accion} · **FINISHED** · [{run['run_name']}]({b.TRACKING_URI}/#/experiments/{run['experiment_id']}/runs/{run['run_id']})"
 
 
-def comparacion_final_presentacion(forward, lasso, backward=None, forward_177=None):
+def comparacion_final_presentacion(forward, lasso, backward=None, forward_177=None, lasso_177=None):
     filas = []
     resultados = [('Forward Selection', forward), ('Group Lasso + OLS', lasso)]
     if backward is not None:
@@ -375,6 +395,9 @@ def comparacion_final_presentacion(forward, lasso, backward=None, forward_177=No
     if forward_177 is not None:
         resultados[0] = ('Forward Selection — 174 predictoras', forward)
         resultados.append(('Forward Selection — 177 predictoras', forward_177))
+    if lasso_177 is not None:
+        resultados[1] = ('Group Lasso + OLS — 174 predictoras', lasso)
+        resultados.append(('Group Lasso + OLS — 177 predictoras', lasso_177))
     for nombre, r in resultados:
         m = r['metricas']
         filas.append({'Método': nombre, 'Características': len(r['seleccion']['seleccionadas']),
@@ -382,7 +405,7 @@ def comparacion_final_presentacion(forward, lasso, backward=None, forward_177=No
             **{etiqueta: b._formato_presentacion(m[k]) for k, etiqueta in [
                 ('train_rmse_original', 'RMSE Train (RUB)'), ('selection_rmse_validation_original', 'RMSE interno (RUB)'),
                 ('train_aic_log', 'AIC [log]'), ('train_bic_log', 'BIC [log]')]}})
-        if forward_177 is not None:
+        if forward_177 is not None or lasso_177 is not None:
             filas[-1].update({'Columnas candidatas': sum(map(len, r['grupos'].values())),
                               'Grupos candidatos': len(r['grupos'])})
     a, bgr = set(forward['seleccion']['seleccionadas']), set(lasso['seleccion']['seleccionadas'])
@@ -399,7 +422,7 @@ def comparacion_final_presentacion(forward, lasso, backward=None, forward_177=No
             for otro, segundo in list(conjuntos.items())[i+1:]:
                 partes.append(f'Compartidas solo por {nombre} y {otro}: {lista((conjunto & segundo)-comunes)}.')
         coincidencias = '  \n'.join(partes)
-    if forward_177 is not None:
+    if forward_177 is not None or lasso_177 is not None:
         conjuntos = {nombre: set(r['seleccion']['seleccionadas']) for nombre, r in resultados}
         firmas = {}
         for g in sorted(set.union(*conjuntos.values())):
@@ -416,14 +439,17 @@ def comparacion_final_presentacion(forward, lasso, backward=None, forward_177=No
     return b.tabla_markdown(pd.DataFrame(filas)), coincidencias
 
 
-def conclusion_presentacion(forward, lasso, backward=None, forward_177=None):
-    if backward is not None or forward_177 is not None:
+def conclusion_presentacion(forward, lasso, backward=None, forward_177=None, lasso_177=None):
+    if backward is not None or forward_177 is not None or lasso_177 is not None:
         resultados = [('Forward Selection', forward), ('Group Lasso + OLS', lasso)]
         if backward is not None:
             resultados.append(('Backward Selection', backward))
         if forward_177 is not None:
             resultados[0] = ('Forward Selection — 174 predictoras', forward)
             resultados.append(('Forward Selection — 177 predictoras', forward_177))
+        if lasso_177 is not None:
+            resultados[1] = ('Group Lasso + OLS — 174 predictoras', lasso)
+            resultados.append(('Group Lasso + OLS — 177 predictoras', lasso_177))
         minimo = min(r['metricas']['selection_rmse_validation_original'] for _, r in resultados)
         menor = min(len(r['seleccion']['seleccionadas']) for _, r in resultados)
         ganadores = ', '.join(n for n, r in resultados if r['metricas']['selection_rmse_validation_original'] == minimo)
@@ -437,6 +463,9 @@ def conclusion_presentacion(forward, lasso, backward=None, forward_177=None):
         universos = ('Forward histórico y Group Lasso parten de 174 columnas; Forward 177 y Backward, de 177. '
                      if forward_177 is not None else
                      'Forward y Group Lasso parten de 174 columnas; Backward parte de 177. ')
+        if lasso_177 is not None:
+            universos = ('Forward y Group Lasso históricos parten de 174 columnas; los nuevos Forward y Group Lasso '
+                         'y Backward parten de 177. ')
         return (f"{ganadores} obtuvo el menor RMSE interno ({minimo:,.0f} RUB). "
             f"El menor número de características finales corresponde a {compactos} ({menor} grupos); "
             f"la mayor reducción proporcional corresponde a {mas_reducidos}. {reducciones}. "
@@ -452,6 +481,26 @@ def conclusion_presentacion(forward, lasso, backward=None, forward_177=None):
     return (f"{ganador} obtuvo el menor RMSE en la validación interna compartida; {compacto} logró la mayor reducción de características.  \n"
             "AIC y BIC son comparables porque ambos OLS ajustan ln(price_rub) sobre las mismas filas con la misma convención.  \n"
             "La comparación reutiliza la validación empleada en la selección; no prueba superioridad fuera de muestra ni define el modelo final. Test no se utilizó.")
+
+
+def comparacion_177_presentacion(forward, lasso, backward=None):
+    """Comparación descriptiva con universo, partición y escalas constantes."""
+    tabla, coincidencias = comparacion_final_presentacion(forward, lasso, backward)
+    resultados = [('Forward — 177', forward), ('Group Lasso + OLS — 177', lasso)]
+    if backward is not None:
+        resultados.append(('Backward — 177', backward))
+    especiales = []
+    for g in EXCLUIDAS:
+        estados = '; '.join(f"{nombre}: {'sí' if g in r['seleccion']['seleccionadas'] else 'no'}"
+                            for nombre, r in resultados)
+        especiales.append(f'`{g}` — {estados}.')
+    menor = min(r['metricas']['selection_rmse_validation_original'] for _, r in resultados)
+    ganadores = ', '.join(nombre for nombre, r in resultados
+                         if r['metricas']['selection_rmse_validation_original'] == menor)
+    analisis = '  \n'.join(especiales + [f'{ganadores} obtuvo el menor RMSE interno ({menor:,.0f} RUB). '
+        'El universo inicial de 177 columnas y la partición son compartidos. '
+        'La validación participó en la selección; esta comparación no constituye una evaluación independiente sobre datos nuevos.'])
+    return tabla, coincidencias, analisis
 
 
 def comparacion_forward_presentacion(historico, nuevo):

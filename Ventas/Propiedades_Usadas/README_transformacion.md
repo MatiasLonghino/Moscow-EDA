@@ -106,3 +106,18 @@ específica distingue candidatas y seleccionadas e informa si `to_center_km`,
 `living_area` y `rooms` ingresaron, y en qué iteración. La comparación final
 incluye los dos Forward, Group Lasso + OLS y Backward, conservando la advertencia
 sobre el uso de la validación interna durante la selección.
+
+`GroupLasso_05_Log_177_Grupos_OLS` agrega Group Lasso + OLS sobre las 177
+candidatas, con exclusiones vacías y el Run real `Forward_04_Log_177_Grupos`
+como referencia obligatoria. Se verifican su estado, universo y partición antes
+de seleccionar. El experimento conserva los 40 lambdas y todos los parámetros
+históricos; el escalador se ajusta solo en el entrenamiento interno y el OLS
+definitivo conserva las escalas exportadas.
+
+Se registra el rango de Gram y de sus bloques, su espectro y condición, sin
+eliminar columnas. La recuperación comprueba además el escalador, la trayectoria
+de coeficientes, los soportes, los residuos KKT y las decisiones por complejidad,
+sin repetir FISTA ni el ajuste OLS. Los artefactos usan una carpeta independiente
+`presentacion_lasso_177`; la importancia conjunta mantiene diez repeticiones con
+semilla 42. El notebook compara los tres métodos con 177 candidatas y conserva
+también los dos experimentos históricos de 174 columnas en la comparación general.
