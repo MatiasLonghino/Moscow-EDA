@@ -188,6 +188,34 @@ def buscar_segmento(X,V,y,yv,mapa,nombre,max_candidatas=8,tolerancia_rmse=.01):
         'n_subtrain':len(y),'n_validacion':len(yv),'minimo_rmse_factible':float(minimo)}
 
 
+def recuperar_busqueda(cache, X, V, y, yv, segmento):
+    """Recuperar la selección histórica sin estimar coeficientes ni repetir BSS."""
+    config = cache['seleccion'][segmento]
+    modelo = cache['modelos_validacion'][segmento]
+    bloques, estructura = base_estimable(X, cache['preparador_validacion']['mapa'])
+    columnas = modelo.model.exog_names[1:]
+    A = sm.add_constant(X[columnas], has_constant='add')
+    np.testing.assert_array_equal(A.to_numpy(), modelo.model.exog)
+    np.testing.assert_array_equal(A.index, modelo.model.data.row_labels)
+    np.testing.assert_allclose(boxcox(np.asarray(y, dtype=float), lmbda=config['lambda_interno']),
+                               modelo.model.endog, rtol=1e-13, atol=1e-13)
+    assert columnas == [c for f in config['features'] for c in bloques[f]]
+    pred, valido = inversa(modelo.predict(sm.add_constant(V[columnas], has_constant='add')), config['lambda_interno'])
+    assert valido.all()
+    metricas = errores(yv, pred)
+    R = np.corrcoef(modelo.model.exog[:, 1:], rowvar=False)
+    max_vif = float(np.diag(np.linalg.inv(np.atleast_2d(R))).max()) if columnas else np.nan
+    ganador = {'n_features':len(config['features']), 'n_parámetros':len(modelo.params),
+        'R2 ajustado':float(modelo.rsquared_adj), 'AIC':float(modelo.aic), 'BIC':float(modelo.bic),
+        'RMSE validación RUB':metricas['RMSE'], 'R2 validación RUB':metricas['R2'], 'VIF máximo':max_vif}
+    return {'nombre':segmento, 'candidatas_totales':config['candidatas_totales'],
+        'candidatas_restringidas':config['candidatas_restringidas'], 'seleccionadas':config['features'],
+        'lambda_interno':config['lambda_interno'], 'modelo_interno':modelo,
+        'columnas_internas':columnas, 'bloques':bloques, 'estructura':estructura,
+        'resultados':None, 'ranking':None, 'ganador':ganador,
+        'n_subtrain':len(y), 'n_validacion':len(yv)}
+
+
 def importancia_permutacion(busqueda,V,yv,semilla=20261028,repeticiones=30):
     modelo=busqueda['modelo_interno'];cols=busqueda['columnas_internas'];lam=busqueda['lambda_interno']
     A=sm.add_constant(V[cols],has_constant='add')[modelo.model.exog_names].to_numpy()
