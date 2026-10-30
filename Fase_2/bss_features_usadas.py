@@ -1,4 +1,4 @@
-"""BSS exhaustivo en un espacio acotado de características; sin usar test."""
+"""BSS exhaustivo por características completas; sin usar test."""
 import json
 import numpy as np
 import pandas as pd
@@ -128,92 +128,198 @@ def base_estimable(X,mapa):
     return bloques,{'constantes':constantes,'dependencias':[c for c in candidatas if c not in conservar],'tolerancia':float(tol)}
 
 
-def buscar_segmento(X,V,y,yv,mapa,nombre,max_candidatas=8,tolerancia_rmse=.01):
+VERSION_BUSQUEDA = 'exhaustivo-features-v2'
+
+
+def firma_busqueda(X, V, y, yv, mapa, nombre, tolerancia_rmse):
+    import hashlib
+    h = hashlib.sha256()
+    h.update(json.dumps({'version':VERSION_BUSQUEDA, 'segmento':nombre, 'mapa':mapa,
+        'columnas':X.columns.tolist(), 'tolerancia':tolerancia_rmse, 'vif':5}, sort_keys=True).encode())
+    for objeto in [X, V, y, yv]:
+        h.update(pd.util.hash_pandas_object(objeto,index=True).to_numpy().tobytes())
+    return h.hexdigest()
+
+
+def _ranking_parcial(C, d, yty, n, bloques_indices):
+    K = np.linalg.inv(C)
+    beta = K @ d
+    rss = yty - n * d @ beta
+    filas = []
+    for feature, ids in bloques_indices.items():
+        extra = n * beta[ids] @ np.linalg.solve(K[np.ix_(ids,ids)], beta[ids])
+        filas.append({'Característica':feature, 'R2 parcial subtrain':extra/(rss+extra), 'Parámetros':len(ids)})
+    return pd.DataFrame(filas).sort_values(['R2 parcial subtrain','Característica'],ascending=[False,True],kind='stable')
+
+
+def buscar_segmento(X,V,y,yv,mapa,nombre,tolerancia_rmse=.01,lote=128,progreso=None):
+    """BSS completo. Poda solo supersets cuyo VIF ya es inadmisible.
+
+    Una base completa de columnas independientes implica independencia de
+    cualquier subconjunto. Con filas y codificaciones fijas, añadir columnas
+    no reduce los VIF existentes. Se conserva el mínimo RMSE por pareja de
+    complejidad (features, parámetros); el resto está dominado para la regla
+    de parsimonia. No hay cribado por ranking ni máximo de features.
+    """
+    import time
+    from scipy.linalg import cho_solve
+    from threadpoolctl import threadpool_limits
     bloques,estructura=base_estimable(X,mapa)
-    disponibles=[f for f,cols in bloques.items() if cols]
-    columnas=[c for f in disponibles for c in bloques[f]]
+    candidatas=[f for f,cols in bloques.items() if cols]
+    columnas=[c for f in candidatas for c in bloques[f]]
+    if not columnas: raise ValueError('No hay características estimables.')
     ybox,lam=boxcox(np.asarray(y,dtype=float))
-    completo=sm.OLS(pd.Series(ybox,index=X.index,name='boxcox_price_rub'),sm.add_constant(X[columnas],has_constant='add')).fit()
-    ranking=[]
-    for f in disponibles:
-        C=np.zeros((len(bloques[f]),len(completo.params)))
-        C[np.arange(len(bloques[f])),[completo.params.index.get_loc(c) for c in bloques[f]]]=1
-        F=float(np.asarray(completo.f_test(C).fvalue).item())
-        contrib=F*len(bloques[f])/(F*len(bloques[f])+completo.df_resid)
-        ranking.append({'Característica':f,'R2 parcial subtrain':contrib,'Parámetros':len(bloques[f])})
-    ranking=pd.DataFrame(ranking).sort_values(['R2 parcial subtrain','Característica'],ascending=[False,True],kind='stable')
-    candidatas=ranking['Característica'].head(max_candidatas).tolist()
-    cols=[c for f in candidatas for c in bloques[f]]
-    media=X[cols].mean();desvio=X[cols].std(ddof=0)
-    Z=((X[cols]-media)/desvio).to_numpy();Zv=((V[cols]-media)/desvio).to_numpy()
-    G=Z.T@Z;c=Z.T@(ybox-ybox.mean());yty=np.sum((ybox-ybox.mean())**2)
-    indices={f:[cols.index(c) for c in bloques[f]] for f in candidatas}
-    n=len(y);filas=[]
-    for mascara in range(2**len(candidatas)):
-        fs=[f for i,f in enumerate(candidatas) if mascara & (1<<i)]
-        ind=[j for f in fs for j in indices[f]];k=len(ind)+1
-        registro={'máscara':mascara,'características':json.dumps(fs,ensure_ascii=False),'n_features':len(fs),'n_parámetros':k,'rango_válido':True}
-        try:
-            if ind:
-                g=G[np.ix_(ind,ind)];np.linalg.cholesky(g)
-                b=np.linalg.solve(g,c[ind]);rss=yty-c[ind]@b
-                pred=ybox.mean()+Zv[:,ind]@b
-                vif=np.diag(np.linalg.inv(g/n));vifmax=float(vif.max())
-            else: rss=yty;pred=np.full(len(yv),ybox.mean());vifmax=np.nan
-            if not rss>0:raise np.linalg.LinAlgError('RSS no positivo')
-            pred_rub,valida=inversa(pred,lam)
-            e=errores(yv,pred_rub) if valida.all() else {'RMSE':np.inf,'R2':np.nan}
-            ll=-n/2*(np.log(2*np.pi)+1+np.log(rss/n))
-            registro.update({'R2 ajustado':1-(rss/(n-k))/(yty/(n-1)),'AIC':-2*ll+2*k,'BIC':-2*ll+k*np.log(n),
-                'RMSE validación RUB':e['RMSE'],'R2 validación RUB':e['R2'],'VIF máximo':vifmax,'inversas inválidas':int((~valida).sum())})
-        except np.linalg.LinAlgError:
-            registro.update({'rango_válido':False,'RMSE validación RUB':np.inf,'VIF máximo':np.inf})
-        filas.append(registro)
-    resultados=pd.DataFrame(filas)
-    validos=resultados.loc[resultados['rango_válido'] & np.isfinite(resultados['RMSE validación RUB'])]
-    factibles=validos.loc[validos['n_features'].eq(0) | validos['VIF máximo'].lt(5)]
-    if factibles.empty: raise ValueError(f'{nombre}: no existe ningún modelo válido con VIF <5; revisar sin usar test.')
-    minimo=factibles['RMSE validación RUB'].min()
-    equivalentes=factibles.loc[factibles['RMSE validación RUB'].le(minimo*(1+tolerancia_rmse))]
+    n=len(y);nv=len(yv);P=len(columnas);m=len(candidatas)
+    mu=X[columnas].mean();sd=X[columnas].std(ddof=0)
+    Z=np.ascontiguousarray(((X[columnas]-mu)/sd).to_numpy())
+    Zv=np.ascontiguousarray(((V[columnas]-mu)/sd).to_numpy())
+    C=Z.T@Z/n;d=Z.T@(ybox-ybox.mean())/n
+    yty=float(np.sum((ybox-ybox.mean())**2));media_y=float(ybox.mean())
+    np.linalg.cholesky(C)  # base completa independiente; submatrices principales SPD
+    indices={f:np.asarray([columnas.index(c) for c in bloques[f]],dtype=int) for f in candidatas}
+    ranking=_ranking_parcial(C,d,yty,n,indices)  # únicamente diagnóstico
+    # Bloques grandes primero: se reutilizan sus inversas en descendientes.
+    recorrido=sorted(candidatas,key=lambda f:(-len(indices[f]),f))
+    posicion={f:i for i,f in enumerate(candidatas)}
+    total=1<<m
+    estad={'subconjuntos_total':total,'subconjuntos_considerados':0,'evaluados_explicitamente':0,
+        'podados_vif':0,'rechazados_vif_explicitos':0,'modelos_cumplen_vif':0,
+        'modelos_inversa_valida':0,'modelos_inversa_invalida':0,'disenos_validos':total,
+        'fallback_numerico':0,'poda':'Monotonicidad del VIF en supersets con codificación y filas fijas'}
+    frontera={};pendientes=[];coeficientes=np.zeros((P,lote))
+    inicio=time.monotonic();ultimo_aviso=inicio
+    real=np.asarray(yv,dtype=float);sst=float(np.sum((real-real.mean())**2))
+
+    def vaciar():
+        if not pendientes:return
+        q=len(pendientes)
+        pred=media_y+Zv@coeficientes[:,:q]
+        rub,validos=inversa(pred,lam)
+        completas=validos.all(axis=0)
+        estad['modelos_inversa_valida']+=int(completas.sum())
+        estad['modelos_inversa_invalida']+=int((~completas).sum())
+        for j in np.flatnonzero(completas):
+            mask,nfeatures,k,rss,vmax=pendientes[j]
+            sse=float(np.sum((real-rub[:,j])**2));rmse=float(np.sqrt(sse/nv))
+            clave=(nfeatures,k)
+            anterior=frontera.get(clave)
+            if anterior is None or (rmse,mask)<(anterior['RMSE validación RUB'],anterior['máscara']):
+                ll=-n/2*(np.log(2*np.pi)+1+np.log(rss/n))
+                fs=[f for f in candidatas if mask & (1<<posicion[f])]
+                frontera[clave]={'máscara':mask,'características':json.dumps(fs,ensure_ascii=False),
+                    'n_features':nfeatures,'n_parámetros':k,'rango_válido':True,
+                    'R2 ajustado':1-(rss/(n-k))/(yty/(n-1)),'AIC':-2*ll+2*k,'BIC':-2*ll+k*np.log(n),
+                    'RMSE validación RUB':rmse,'R2 validación RUB':1-sse/sst,'VIF máximo':vmax,'inversas inválidas':0}
+        pendientes.clear()
+
+    def visitar(start,mascara,ids,K,nfeatures):
+        nonlocal ultimo_aviso
+        estad['evaluados_explicitamente']+=1
+        vmax=float(np.diag(K).max()) if len(ids) else np.nan
+        if len(ids) and vmax>=5:
+            estad['rechazados_vif_explicitos']+=1
+            # Banda conservadora: cerca del umbral no se poda descendencia.
+            if vmax>5+1e-8:
+                estad['podados_vif']+=(1<<(m-start))-1
+                return
+        else:
+            estad['modelos_cumplen_vif']+=1
+            beta=K@d[ids] if len(ids) else np.empty(0)
+            rss=yty-n*float(d[ids]@beta) if len(ids) else yty
+            if rss<=0 or not np.isfinite(rss):
+                raise FloatingPointError('RSS no positivo; búsqueda no declarada completa.')
+            j=len(pendientes);coeficientes[:,j]=0
+            if len(ids):coeficientes[ids,j]=beta
+            pendientes.append((mascara,nfeatures,len(ids)+1,rss,vmax))
+            if len(pendientes)==lote:vaciar()
+        if estad['evaluados_explicitamente']%2048==0 and progreso and time.monotonic()-ultimo_aviso>20:
+            progreso({'segmento':nombre,'explicitos':estad['evaluados_explicitamente'],
+                'podados':estad['podados_vif'],'total':total,'segundos':time.monotonic()-inicio})
+            ultimo_aviso=time.monotonic()
+        for j in range(start,m):
+            f=recorrido[j];nuevos=indices[f]
+            if len(ids):
+                B=C[np.ix_(ids,nuevos)];U=K@B
+                S=C[np.ix_(nuevos,nuevos)]-B.T@U
+            else:S=C[np.ix_(nuevos,nuevos)]
+            try:
+                L=np.linalg.cholesky(S)
+                D=cho_solve((L,True),np.eye(len(nuevos)),check_finite=False)
+                if len(ids):
+                    UD=U@D
+                    nuevoK=np.block([[K+UD@U.T,-UD],[-UD.T,D]])
+                else:nuevoK=D
+            except np.linalg.LinAlgError:
+                estad['fallback_numerico']+=1
+                todos=np.concatenate([ids,nuevos])
+                # No se descarta un candidato por un fallo de actualización.
+                nuevoK=np.linalg.inv(C[np.ix_(todos,todos)])
+            visitar(j+1,mascara|(1<<posicion[f]),np.concatenate([ids,nuevos]),nuevoK,nfeatures+1)
+
+    with threadpool_limits(limits=1,user_api='blas'):
+        visitar(0,0,np.empty(0,dtype=int),np.empty((0,0)),0)
+        vaciar()
+    estad['subconjuntos_considerados']=estad['evaluados_explicitamente']+estad['podados_vif']
+    assert estad['subconjuntos_considerados']==total
+    assert estad['modelos_cumplen_vif']==estad['modelos_inversa_valida']+estad['modelos_inversa_invalida']
+    estad['segundos']=time.monotonic()-inicio
+    resultados=pd.DataFrame(frontera.values())
+    if resultados.empty:raise ValueError('Sin modelos admisibles; no existe una búsqueda completa utilizable.')
+    minimo=float(resultados['RMSE validación RUB'].min())
+    equivalentes=resultados.loc[resultados['RMSE validación RUB'].le(minimo*(1+tolerancia_rmse))]
     ganador=equivalentes.sort_values(['n_features','n_parámetros','RMSE validación RUB','máscara'],kind='stable').iloc[0]
     seleccionadas=json.loads(ganador['características'])
-    columnas_elegidas=[c for f in seleccionadas for c in bloques[f]]
-    inner=sm.OLS(pd.Series(ybox,index=X.index,name='boxcox_price_rub'),sm.add_constant(X[columnas_elegidas],has_constant='add')).fit()
-    pv=inner.predict(sm.add_constant(V[columnas_elegidas],has_constant='add'))
+    elegidas=[c for f in seleccionadas for c in bloques[f]]
+    inner=sm.OLS(pd.Series(ybox,index=X.index,name='boxcox_price_rub'),sm.add_constant(X[elegidas],has_constant='add')).fit()
+    pv=inner.predict(sm.add_constant(V[elegidas],has_constant='add'))
     rub,ok=inversa(pv,lam);assert ok.all()
     np.testing.assert_allclose(errores(yv,rub)['RMSE'],ganador['RMSE validación RUB'],rtol=1e-6)
-    return {'nombre':nombre,'candidatas_totales':disponibles,'candidatas_restringidas':candidatas,'ranking':ranking,
+    return {'nombre':nombre,'candidatas_totales':candidatas,'candidatas_evaluadas':candidatas,'ranking':ranking,
         'bloques':bloques,'estructura':estructura,'resultados':resultados,'seleccionadas':seleccionadas,
-        'lambda_interno':float(lam),'modelo_interno':inner,'ganador':ganador.to_dict(),'columnas_internas':columnas_elegidas,
-        'n_subtrain':len(y),'n_validacion':len(yv),'minimo_rmse_factible':float(minimo)}
+        'lambda_interno':float(lam),'modelo_interno':inner,'ganador':ganador.to_dict(),'columnas_internas':elegidas,
+        'n_subtrain':len(y),'n_validacion':len(yv),'minimo_rmse_factible':minimo,'estadisticas':estad,
+        'version':VERSION_BUSQUEDA,'firma':firma_busqueda(X,V,y,yv,mapa,nombre,tolerancia_rmse),'completa':True}
 
 
-def recuperar_busqueda(cache, X, V, y, yv, segmento):
-    """Recuperar la selección histórica sin estimar coeficientes ni repetir BSS."""
-    config = cache['seleccion'][segmento]
-    modelo = cache['modelos_validacion'][segmento]
-    bloques, estructura = base_estimable(X, cache['preparador_validacion']['mapa'])
-    columnas = modelo.model.exog_names[1:]
-    A = sm.add_constant(X[columnas], has_constant='add')
-    np.testing.assert_array_equal(A.to_numpy(), modelo.model.exog)
-    np.testing.assert_array_equal(A.index, modelo.model.data.row_labels)
-    np.testing.assert_allclose(boxcox(np.asarray(y, dtype=float), lmbda=config['lambda_interno']),
-                               modelo.model.endog, rtol=1e-13, atol=1e-13)
-    assert columnas == [c for f in config['features'] for c in bloques[f]]
-    pred, valido = inversa(modelo.predict(sm.add_constant(V[columnas], has_constant='add')), config['lambda_interno'])
-    assert valido.all()
-    metricas = errores(yv, pred)
-    R = np.corrcoef(modelo.model.exog[:, 1:], rowvar=False)
-    max_vif = float(np.diag(np.linalg.inv(np.atleast_2d(R))).max()) if columnas else np.nan
-    ganador = {'n_features':len(config['features']), 'n_parámetros':len(modelo.params),
-        'R2 ajustado':float(modelo.rsquared_adj), 'AIC':float(modelo.aic), 'BIC':float(modelo.bic),
-        'RMSE validación RUB':metricas['RMSE'], 'R2 validación RUB':metricas['R2'], 'VIF máximo':max_vif}
-    return {'nombre':segmento, 'candidatas_totales':config['candidatas_totales'],
-        'candidatas_restringidas':config['candidatas_restringidas'], 'seleccionadas':config['features'],
-        'lambda_interno':config['lambda_interno'], 'modelo_interno':modelo,
-        'columnas_internas':columnas, 'bloques':bloques, 'estructura':estructura,
-        'resultados':None, 'ranking':None, 'ganador':ganador,
-        'n_subtrain':len(y), 'n_validacion':len(yv)}
+def cache_busqueda_valida(cache, contexto):
+    if cache is None:return False
+    config=cache.get('configuracion',{})
+    if config.get('version_busqueda')!=VERSION_BUSQUEDA or config.get('firma_contexto')!=contexto:return False
+    for s,seleccion in cache.get('seleccion',{}).items():
+        evidencia=cache.get('busqueda',{}).get(s,{})
+        if not evidencia.get('completa') or evidencia.get('version')!=VERSION_BUSQUEDA:return False
+        if seleccion.get('candidatas_totales')!=seleccion.get('candidatas_evaluadas'):return False
+        if evidencia.get('estadisticas',{}).get('subconjuntos_considerados')!=2**len(seleccion['candidatas_totales']):return False
+    return len(cache.get('seleccion',{}))==4
+
+
+def recuperar_busqueda(cache, X, V, y, yv, segmento, tolerancia_rmse=.01):
+    config=cache['seleccion'][segmento];evidencia=cache['busqueda'][segmento]
+    firma=firma_busqueda(X,V,y,yv,cache['preparador_validacion']['mapa'],segmento,tolerancia_rmse)
+    if evidencia['firma']!=firma or not evidencia['completa']:raise ValueError('Caché BSS incompatible: datos o candidatas cambiaron.')
+    modelo=cache['modelos_validacion'][segmento]
+    bloques,estructura=base_estimable(X,cache['preparador_validacion']['mapa'])
+    candidatas=[f for f,cs in bloques.items() if cs]
+    if candidatas!=config['candidatas_totales']:raise ValueError('Caché inválida por cambio de características.')
+    columnas=modelo.model.exog_names[1:]
+    A=sm.add_constant(X[columnas],has_constant='add')
+    np.testing.assert_array_equal(A.to_numpy(),modelo.model.exog)
+    np.testing.assert_allclose(boxcox(np.asarray(y,dtype=float),lmbda=config['lambda_interno']),modelo.model.endog,rtol=1e-13,atol=1e-13)
+    assert columnas==[c for f in config['features'] for c in bloques[f]]
+    # Ranking diagnóstico regenerado con productos de subtrain, sin filtrar.
+    cols=[c for f in candidatas for c in bloques[f]]
+    Z=((X[cols]-X[cols].mean())/X[cols].std(ddof=0)).to_numpy()
+    ybox=np.asarray(modelo.model.endog)
+    # endog del modelo recuperado contiene todas las filas del segmento.
+    C=Z.T@Z/len(X);d=Z.T@(ybox-ybox.mean())/len(X)
+    ids={f:np.array([cols.index(c) for c in bloques[f]]) for f in candidatas}
+    ranking=_ranking_parcial(C,d,float(np.sum((ybox-ybox.mean())**2)),len(X),ids)
+    return {'nombre':segmento,'candidatas_totales':candidatas,'candidatas_evaluadas':candidatas,
+        'seleccionadas':config['features'],'lambda_interno':config['lambda_interno'],'modelo_interno':modelo,
+        'columnas_internas':columnas,'bloques':bloques,'estructura':estructura,'resultados':None,'ranking':ranking,
+        'ganador':evidencia['ganador'],'minimo_rmse_factible':evidencia['minimo_rmse_factible'],
+        'estadisticas':evidencia['estadisticas'],'version':VERSION_BUSQUEDA,'firma':firma,'completa':True,
+        'n_subtrain':len(y),'n_validacion':len(yv)}
 
 
 def importancia_permutacion(busqueda,V,yv,semilla=20261028,repeticiones=30):
