@@ -128,14 +128,115 @@ def base_estimable(X,mapa):
     return bloques,{'constantes':constantes,'dependencias':[c for c in candidatas if c not in conservar],'tolerancia':float(tol)}
 
 
-VERSION_BUSQUEDA = 'exhaustivo-features-v2'
+VERSION_BUSQUEDA = 'exhaustivo-features-gvif-v3'
+REGLA_COLINEALIDAD = {'vif_numericas_binarias_lt': 5.0, 'gvif_ajustado_categoricas_lt': float(np.sqrt(5)),
+    'ajuste': 'GVIF^(1/(2*df))', 'poda': 'Solo VIF de numéricas/binarias; sin poda GVIF',
+    'fundamento_umbral': 'Heurística por dimensión; no umbral universal de GVIF'}
+
+
+def tipos_features(bloques, tipos=None):
+    """La declaración explícita permite nominales de un solo parámetro estimable."""
+    nominales = {'district', 'building_type', 'renovation', 'metro_line'}
+    binarias = {'has_balcony', 'metro_distance_type', 'seller_type'}
+    salida = {}
+    for f, cs in bloques.items():
+        tipo = (tipos or {}).get(f, 'Nominal' if f in nominales or len(cs)>1 else 'Binaria' if f in binarias else 'Numérica')
+        if tipo not in {'Nominal', 'Ordinal', 'Binaria', 'Numérica'}:
+            raise ValueError(f'Tipo no reconocido para {f}: {tipo}')
+        if tipo in {'Numérica','Binaria'} and len(cs)>1:
+            raise ValueError(f'{f}: varios parámetros requieren declarar un bloque categórico.')
+        salida[f] = tipo
+    return salida
+
+
+def _logdet_spd(matriz):
+    """Log-determinante de una matriz SPD; singularidad explícita, sin pseudoinversa."""
+    L = np.linalg.cholesky(matriz)
+    return float(2*np.log(np.diag(L)).sum())
+
+
+def _medidas_bloques(K, grupos, tipos, logdet_C):
+    """Núcleo único para búsqueda y diagnóstico posterior.
+
+    C es la correlación de predictores centrados y K=C^-1. Por la identidad
+    de Jacobi, GVIF(g)=det(C_g)*det(K_g), equivalente al cociente de
+    determinantes en la correlación de coeficientes de OLS con intercepto.
+    logdet_C contiene los log-determinantes de los bloques fijos de C.
+    """
+    diagonal = np.diag(K)
+    valores, ajustados = {}, {}
+    for f, ids in grupos.items():
+        df = len(ids)
+        if tipos[f] in {'Nominal','Ordinal'}:
+            loggvif = logdet_C[f]+_logdet_spd(K[np.ix_(ids,ids)])
+            ajustados[f] = float(np.exp(loggvif/(2*df)))
+            valores[f] = ajustados[f]
+        else:
+            valores[f] = float(diagonal[ids[0]])
+    cumple = {f: bool(np.isfinite(v) and v < (np.sqrt(5) if tipos[f] in {'Nominal','Ordinal'} else 5))
+              for f,v in valores.items()}
+    return valores, ajustados, cumple
+
+
+def vif_features(modelo, bloques, tipos=None):
+    """Una fila por característica; acepta OLS ajustado o DataFrame de diseño.
+
+    Los VIF de dummies son secundarios. No ordena indicadores de escalas
+    distintas. Singularidad, constancia y valores no finitos producen una
+    indicación explícita de no calculable, nunca una sustitución arbitraria.
+    """
+    if hasattr(modelo, 'model'):
+        X = pd.DataFrame(modelo.model.exog, columns=modelo.model.exog_names)
+    else:
+        X = pd.DataFrame(modelo).copy()
+    X = X.drop(columns=['const','Intercept'], errors='ignore')
+    bloques = {f:[c for c in cs if c in X] for f,cs in bloques.items()}
+    bloques = {f:cs for f,cs in bloques.items() if cs}
+    columnas = [c for cs in bloques.values() for c in cs]
+    if len(columnas)!=len(set(columnas)) or set(columnas)!=set(X):
+        raise ValueError('El mapa debe cubrir todas las columnas estimables una sola vez.')
+    tipos = tipos_features(bloques, tipos)
+    grupos = {f:np.array([X.columns.get_loc(c) for c in cs],dtype=int) for f,cs in bloques.items()}
+    error = None
+    try:
+        A = X.to_numpy(dtype=float)
+        if not np.isfinite(A).all() or (X.std(ddof=0)<=0).any():
+            raise ValueError('Valores no finitos o columnas constantes.')
+        Z=(A-A.mean(axis=0))/A.std(axis=0)
+        if np.linalg.matrix_rank(Z)!=X.shape[1]:
+            raise ValueError('Diseño singular o no estimable.')
+        C=np.atleast_2d(Z.T@Z/len(Z))
+        from scipy.linalg import cho_solve
+        K=cho_solve((np.linalg.cholesky(C),True),np.eye(len(C)))
+        logC={f:_logdet_spd(C[np.ix_(ids,ids)]) for f,ids in grupos.items()}
+        valores, ajustados, cumple=_medidas_bloques(K,grupos,tipos,logC)
+        diagonal=np.diag(K)
+    except (ValueError,np.linalg.LinAlgError) as exc:
+        error=str(exc);valores={f:np.nan for f in grupos};ajustados={};cumple={}
+        diagonal=np.full(X.shape[1],np.nan)
+    filas=[]
+    for f,ids in grupos.items():
+        categorica=tipos[f] in {'Nominal','Ordinal'}
+        gv=ajustados.get(f,np.nan)
+        filas.append({'Característica':f,'Tipo':tipos[f],'Parámetros':len(ids),
+            'Indicador principal':'GVIF ajustado' if categorica else 'VIF', 'Valor':valores[f],
+            'Cumple criterio':'No calculable' if error else 'Sí' if cumple[f] else 'No',
+            'VIF máximo':float(diagonal[ids].max()),'Columnas VIF >5':int((diagonal[ids]>5).sum()) if not error else np.nan,
+            'GVIF':float(np.exp(2*len(ids)*np.log(gv))) if categorica and np.isfinite(gv) else valores[f] if not categorica else np.nan,
+            'df':len(ids),'GVIF ajustado':gv,'Umbral':np.sqrt(5) if categorica else 5,
+            'Estado cálculo':error or 'Calculable'})
+    tabla=pd.DataFrame(filas,columns=['Característica','Tipo','Parámetros','Indicador principal','Valor','Cumple criterio',
+        'VIF máximo','Columnas VIF >5','GVIF','df','GVIF ajustado','Umbral','Estado cálculo'])
+    tabla.attrs['vif_columnas']=dict(zip(X.columns,diagonal))
+    return tabla
 
 
 def firma_busqueda(X, V, y, yv, mapa, nombre, tolerancia_rmse):
     import hashlib
     h = hashlib.sha256()
     h.update(json.dumps({'version':VERSION_BUSQUEDA, 'segmento':nombre, 'mapa':mapa,
-        'columnas':X.columns.tolist(), 'tolerancia':tolerancia_rmse, 'vif':5}, sort_keys=True).encode())
+        'columnas':X.columns.tolist(), 'tolerancia':tolerancia_rmse, 'colinealidad':REGLA_COLINEALIDAD,
+        'tipos':tipos_features(mapa)}, sort_keys=True).encode())
     for objeto in [X, V, y, yv]:
         h.update(pd.util.hash_pandas_object(objeto,index=True).to_numpy().tobytes())
     return h.hexdigest()
@@ -153,11 +254,12 @@ def _ranking_parcial(C, d, yty, n, bloques_indices):
 
 
 def buscar_segmento(X,V,y,yv,mapa,nombre,tolerancia_rmse=.01,lote=128,progreso=None):
-    """BSS completo. Poda solo supersets cuyo VIF ya es inadmisible.
+    """BSS completo con VIF/GVIF por tipo; poda solo VIF numérico/binario.
 
     Una base completa de columnas independientes implica independencia de
     cualquier subconjunto. Con filas y codificaciones fijas, añadir columnas
-    no reduce los VIF existentes. Se conserva el mínimo RMSE por pareja de
+    no reduce los VIF existentes de términos numéricos/binarios. No se poda
+    por GVIF ni por VIF de dummies. Se conserva el mínimo RMSE por pareja de
     complejidad (features, parámetros); el resto está dominado para la regla
     de parsimonia. No hay cribado por ranking ni máximo de features.
     """
@@ -177,6 +279,8 @@ def buscar_segmento(X,V,y,yv,mapa,nombre,tolerancia_rmse=.01,lote=128,progreso=N
     yty=float(np.sum((ybox-ybox.mean())**2));media_y=float(ybox.mean())
     np.linalg.cholesky(C)  # base completa independiente; submatrices principales SPD
     indices={f:np.asarray([columnas.index(c) for c in bloques[f]],dtype=int) for f in candidatas}
+    tipos=tipos_features(bloques)
+    logC={f:_logdet_spd(C[np.ix_(ids,ids)]) for f,ids in indices.items()}
     ranking=_ranking_parcial(C,d,yty,n,indices)  # únicamente diagnóstico
     # Bloques grandes primero: se reutilizan sus inversas en descendientes.
     recorrido=sorted(candidatas,key=lambda f:(-len(indices[f]),f))
@@ -185,7 +289,8 @@ def buscar_segmento(X,V,y,yv,mapa,nombre,tolerancia_rmse=.01,lote=128,progreso=N
     estad={'subconjuntos_total':total,'subconjuntos_considerados':0,'evaluados_explicitamente':0,
         'podados_vif':0,'rechazados_vif_explicitos':0,'modelos_cumplen_vif':0,
         'modelos_inversa_valida':0,'modelos_inversa_invalida':0,'disenos_validos':total,
-        'fallback_numerico':0,'poda':'Monotonicidad del VIF en supersets con codificación y filas fijas'}
+        'fallback_numerico':0,'rechazados_gvif_explicitos':0,
+        'poda':REGLA_COLINEALIDAD['poda']}
     frontera={};pendientes=[];coeficientes=np.zeros((P,lote))
     inicio=time.monotonic();ultimo_aviso=inicio
     real=np.asarray(yv,dtype=float);sst=float(np.sum((real-real.mean())**2))
@@ -212,17 +317,28 @@ def buscar_segmento(X,V,y,yv,mapa,nombre,tolerancia_rmse=.01,lote=128,progreso=N
                     'RMSE validación RUB':rmse,'R2 validación RUB':1-sse/sst,'VIF máximo':vmax,'inversas inválidas':0}
         pendientes.clear()
 
-    def visitar(start,mascara,ids,K,nfeatures):
+    def visitar(start,mascara,ids,K,nfeatures,grupos):
         nonlocal ultimo_aviso
         estad['evaluados_explicitamente']+=1
         vmax=float(np.diag(K).max()) if len(ids) else np.nan
-        if len(ids) and vmax>=5:
+        numericos=[ix[0] for f,ix in grupos.items() if tipos[f] in {'Numérica','Binaria'}]
+        vmax_num=float(np.diag(K)[numericos].max()) if numericos else 0.0
+        if vmax_num>=5:
             estad['rechazados_vif_explicitos']+=1
             # Banda conservadora: cerca del umbral no se poda descendencia.
-            if vmax>5+1e-8:
+            if vmax_num>5+1e-8:
                 estad['podados_vif']+=(1<<(m-start))-1
                 return
         else:
+            try:
+                valores,ajustados,cumple=_medidas_bloques(K,grupos,tipos,logC)
+            except np.linalg.LinAlgError:
+                # Recalcular la inversa; no descartar silenciosamente por redondeo.
+                K=np.linalg.inv(C[np.ix_(ids,ids)])
+                valores,ajustados,cumple=_medidas_bloques(K,grupos,tipos,logC)
+            admisible=all(cumple.values())
+            if not admisible:estad['rechazados_gvif_explicitos']+=1
+        if vmax_num<5 and admisible:
             estad['modelos_cumplen_vif']+=1
             beta=K@d[ids] if len(ids) else np.empty(0)
             rss=yty-n*float(d[ids]@beta) if len(ids) else yty
@@ -254,10 +370,11 @@ def buscar_segmento(X,V,y,yv,mapa,nombre,tolerancia_rmse=.01,lote=128,progreso=N
                 todos=np.concatenate([ids,nuevos])
                 # No se descarta un candidato por un fallo de actualización.
                 nuevoK=np.linalg.inv(C[np.ix_(todos,todos)])
-            visitar(j+1,mascara|(1<<posicion[f]),np.concatenate([ids,nuevos]),nuevoK,nfeatures+1)
+            visitar(j+1,mascara|(1<<posicion[f]),np.concatenate([ids,nuevos]),nuevoK,nfeatures+1,
+                {**grupos,f:np.arange(len(ids),len(ids)+len(nuevos))})
 
     with threadpool_limits(limits=1,user_api='blas'):
-        visitar(0,0,np.empty(0,dtype=int),np.empty((0,0)),0)
+        visitar(0,0,np.empty(0,dtype=int),np.empty((0,0)),0,{})
         vaciar()
     estad['subconjuntos_considerados']=estad['evaluados_explicitamente']+estad['podados_vif']
     assert estad['subconjuntos_considerados']==total
@@ -273,6 +390,8 @@ def buscar_segmento(X,V,y,yv,mapa,nombre,tolerancia_rmse=.01,lote=128,progreso=N
     inner=sm.OLS(pd.Series(ybox,index=X.index,name='boxcox_price_rub'),sm.add_constant(X[elegidas],has_constant='add')).fit()
     pv=inner.predict(sm.add_constant(V[elegidas],has_constant='add'))
     rub,ok=inversa(pv,lam);assert ok.all()
+    diagnostico=vif_features(inner,{f:bloques[f] for f in seleccionadas})
+    assert diagnostico['Cumple criterio'].eq('Sí').all()
     np.testing.assert_allclose(errores(yv,rub)['RMSE'],ganador['RMSE validación RUB'],rtol=1e-6)
     return {'nombre':nombre,'candidatas_totales':candidatas,'candidatas_evaluadas':candidatas,'ranking':ranking,
         'bloques':bloques,'estructura':estructura,'resultados':resultados,'seleccionadas':seleccionadas,
@@ -342,17 +461,3 @@ def importancia_permutacion(busqueda,V,yv,semilla=20261028,repeticiones=30):
     return detalle,resumen.reset_index(),rmse
 
 
-def vif_features(modelo,bloques):
-    cols=modelo.model.exog_names[1:];X=modelo.model.exog[:,1:]
-    if not cols:return pd.DataFrame(columns=['Característica','VIF máximo','Columnas VIF >5','GVIF ajustado'])
-    R=np.corrcoef(X,rowvar=False);R=np.atleast_2d(R);vif=np.diag(np.linalg.inv(R));_,ld=np.linalg.slogdet(R)
-    filas=[]
-    for f,cs in bloques.items():
-        ids=[cols.index(c) for c in cs if c in cols]
-        if not ids:continue
-        otros=[i for i in range(len(cols)) if i not in ids]
-        sa,la=np.linalg.slogdet(R[np.ix_(ids,ids)]);sb,lb=np.linalg.slogdet(R[np.ix_(otros,otros)]) if otros else (1,0)
-        gv=np.exp((la+lb-ld)/(2*len(ids))) if sa>0 and sb>0 else np.nan
-        filas.append({'Característica':f,'VIF máximo':float(vif[ids].max()),'Columnas VIF >5':int((vif[ids]>5).sum()),
-                      'GVIF ajustado':float(gv) if len(cs)>1 else 'No aplica'})
-    return pd.DataFrame(filas).sort_values('VIF máximo',ascending=False)

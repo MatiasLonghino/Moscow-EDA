@@ -64,7 +64,7 @@ def conectar(raiz):
     if str(raiz) not in sys.path:
         sys.path.insert(0, str(raiz))
     # Reutiliza .env, variables de entorno, URI y límites de conexión de Fase 1.
-    from Ventas.Propiedades_Usadas.scripts.baseline_ols import conectar as conexion_fase1
+    from Ventas.Fase1_PropUsadas.scripts.baseline_ols import conectar as conexion_fase1
     return conexion_fase1(raiz)
 
 
@@ -135,10 +135,18 @@ def metricas_modelo(modelo, train, test, lam, bloques):
         pred = inv_boxcox(modelo.predict(diseno(datos, modelo.model.exog_names)), lam)
         m.update({f"{nombre}_{k}": v for k, v in errores(datos.price_rub, pred).items()})
     columnas = [c for c in modelo.model.exog_names if c != "const"]
-    vif = np.diag(np.linalg.inv(train[columnas].corr().to_numpy()))
-    vifs = dict(zip(columnas, vif))
+    from bss_features_usadas import vif_features
+    principal = vif_features(modelo,bloques)
+    vifs = principal.attrs['vif_columnas']
+    vif = np.array([vifs[c] for c in columnas])
     m.update(train_vif_max=float(vif.max()), train_parameters_vif_gt5=int((vif > 5).sum()),
              train_features_vif_gt5=sum(any(vifs[c] > 5 for c in cols) for cols in bloques.values()))
+    m.update(train_features_fail_vif_gvif=int(principal['Cumple criterio'].ne('Sí').sum()),
+             train_features_not_calculable=int(principal['Cumple criterio'].eq('No calculable').sum()))
+    cats = principal.loc[principal.Tipo.isin(['Nominal','Ordinal'])]
+    nums = principal.loc[~principal.Tipo.isin(['Nominal','Ordinal'])]
+    if len(cats):m['train_gvif_adjusted_max_categorical']=cats['Valor'].max()
+    if len(nums):m['train_vif_max_numeric_binary']=nums['Valor'].max()
     return {k: float(v) for k, v in m.items() if np.isfinite(v)}
 
 
@@ -172,22 +180,24 @@ def preparar_registro(raiz):
     raiz = Path(raiz).resolve()
     if git(raiz, "branch", "--show-current").decode().strip() != "devLonghino":
         raise ValueError("El registro de esta entrega corresponde a devLonghino.")
-    carpeta = raiz / "Fase_2"
+    carpeta = raiz / "Ventas/Fase2_PropUsadas"
     datos = carpeta / "data"
     fuentes = {p.relative_to(raiz).as_posix(): sha(p.read_bytes())
                for p in datos.rglob("*") if p.is_file()}
-    fuentes["Ventas/Propiedades_Usadas/data/PropUsadas_Integrado.csv"] = sha(
-        (raiz / "Ventas/Propiedades_Usadas/data/PropUsadas_Integrado.csv").read_bytes())
+    fuentes["Ventas/Fase1_PropUsadas/data/PropUsadas_Integrado.csv"] = sha(
+        (raiz / "Ventas/Fase1_PropUsadas/data/PropUsadas_Integrado.csv").read_bytes())
     notebooks = {n: json.loads((carpeta / f"{n}.ipynb").read_text(encoding="utf-8")) for n in CUADERNOS}
     for n, notebook in notebooks.items():
-        fuentes[f"Fase_2/{n}.ipynb:contenido_cientifico"] = sha(json_bytes(celdas_cientificas(notebook)))
+        fuentes[f"Ventas/Fase2_PropUsadas/{n}.ipynb:contenido_cientifico"] = sha(json_bytes(celdas_cientificas(notebook)))
     for n in ["bss_features_usadas.py", "registro_experimentos.py"]:
-        fuentes[f"Fase_2/{n}"] = sha((carpeta / n).read_bytes())
+        fuentes[f"Ventas/Fase2_PropUsadas/{n}"] = sha((carpeta / n).read_bytes())
     transformador = joblib.load(datos / "transformadores_ols_usadas.joblib")
     registro = transformador["registro"]
     originales = joblib.load(datos / "modelos_ols_por_segmento.joblib")
     sin_centro = joblib.load(datos / "modelos_ols_sin_to_center_km.joblib")
-    exhaustivo = joblib.load(datos / "bss_features/modelos_bss_features.joblib")
+    activo = joblib.load(datos / "bss_features/modelos_bss_features.joblib")
+    nuevo_gvif = activo if 'gvif' in activo.get('configuracion',{}).get('version_busqueda','') else None
+    exhaustivo = activo['historico_vif'] if nuevo_gvif is not None else activo
     limitado, revision, huella_historica = historico_limitado(raiz)
     parametros = originales["parametros_segmentacion_boxcox"]
     train = pd.read_csv(datos / "train_ols_usadas.csv")
@@ -200,7 +210,7 @@ def preparar_registro(raiz):
     etiquetas_test = segmentos(test.to_center_km, parametros["cuartiles_distancia_km"])
     evidencia = {n: evidencia_notebook(nb) for n, nb in notebooks.items()}
     runs = []
-    precio = pd.read_csv(raiz / "Ventas/Propiedades_Usadas/data/PropUsadas_Integrado.csv", usecols=["price_rub"]).price_rub
+    precio = pd.read_csv(raiz / "Ventas/Fase1_PropUsadas/data/PropUsadas_Integrado.csv", usecols=["price_rub"]).price_rub
     # Estos números históricos se verifican contra la tabla conservada y la entrada.
     texto_analisis = evidencia["Analisis_Usadas"][0]
     assert len(precio) == 50000 and precio.gt(0).all() and "47.541" in texto_analisis and "2.459" in texto_analisis
@@ -242,6 +252,8 @@ def preparar_registro(raiz):
                 ("04_OLS_SinCentro", "OLS sin centro", sin_centro["modelos"], None),
                 ("05_BSS_Limitado", "BSS limitado", limitado["modelos_finales"] if limitado else {}, limitado),
                 ("06_BSS_Exhaustivo", "BSS exhaustivo", exhaustivo["modelos_finales"], exhaustivo)]
+    if nuevo_gvif is not None:
+        familias.append(('08_BSS_GVIF','BSS GVIF',nuevo_gvif['modelos_finales'],nuevo_gvif))
     for prefijo, metodo, modelos, cache in familias:
         for s in SEGMENTOS:
             nombre = f"F2_{prefijo}_{s.title().replace(' ', '_')}"
@@ -291,12 +303,12 @@ def preparar_registro(raiz):
                     tolerancia_rmse=cache["configuracion"]["tolerancia_rmse"], vif_estrictamente_menor=5,
                     repeticiones_permutation_importance=cache["configuracion"]["repeticiones"],
                     validacion_interna="Primeras 32000 de train / últimas 8000; segmentación fija",
-                    boxcox_lambda_interno=seleccion["lambda_interno"], busqueda_exhaustiva=cache is exhaustivo)
+                    boxcox_lambda_interno=seleccion["lambda_interno"], busqueda_exhaustiva=cache is not limitado)
                 interno = cache["modelos_validacion"][s]
                 r["modelo_validacion"] = interno
                 config["n_subtrain"] = int(interno.nobs)
                 config["n_validacion"] = int(etiquetas_train.loc[32000:].eq(s).sum())
-                if cache is exhaustivo:
+                if cache is exhaustivo or cache is nuevo_gvif:
                     prueba = cache["busqueda"][s]
                     config["subconjuntos_considerados"] = prueba["estadisticas"]["subconjuntos_considerados"]
                     for k, v in prueba["estadisticas"].items():
@@ -310,6 +322,20 @@ def preparar_registro(raiz):
                     config.update(subconjuntos_considerados=256, revision_historica=revision)
                     r["archivos"]["resultados/historico_verificable.md"] = _tablas_historicas(raiz, revision, s).encode()
                 r["cache_bss"] = cache
+                if cache is nuevo_gvif:
+                    # La preparación interna no cambió: puede compartirse con el run histórico.
+                    assert joblib.hash(cache['preparador_validacion']) == joblib.hash(exhaustivo['preparador_validacion'])
+                    config.update(version_busqueda=cache['configuracion']['version_busqueda'],
+                                  regla_colinealidad=cache['configuracion']['regla_colinealidad'],
+                                  selection_method='BSS exhaustivo por bloques con VIF/GVIF',
+                                  vif_numericas_binarias_lt=5,gvif_ajustado_categoricas_lt=float(np.sqrt(5)))
+                    r['referencia_bss_anterior']=f"F2_06_BSS_Exhaustivo_{s.title().replace(' ','_')}"
+                    historico=por_metodo[('06_BSS_Exhaustivo',s)]
+                    for k in ['test_r2_rub','test_mae_rub','test_rmse_rub','train_vif_max']:
+                        metricas[f'delta_vs_bss_vif_{k}']=metricas[k]-historico['metricas'][k]
+                    r['archivos']['resultados/comparacion_bss_anterior.md']=markdown(pd.DataFrame({
+                        'Métrica':list(metricas), 'BSS GVIF':list(metricas.values()),
+                        'BSS VIF anterior':[historico['metricas'].get(k,np.nan) for k in metricas]})).encode()
             por_metodo[(prefijo, s)] = r
             tablas.append({"Run": nombre, "Segmento": s, "Método": metodo,
                            "Features": len(bloques), **metricas})
@@ -338,15 +364,27 @@ def preparar_registro(raiz):
             contexto["versiones_entorno"][paquete] = version(paquete)
         except PackageNotFoundError:
             contexto["versiones_entorno"][paquete] = "No instalado"
-    _completar_validacion(raiz, runs, registro, train, etiquetas_train)
+    _completar_validacion(raiz, [r for r in runs if r['nombre'].startswith('F2_08_')] if nuevo_gvif is not None else runs,
+                         registro, train, etiquetas_train)
     comparacion["tabla"] = pd.DataFrame([{"Run": r["nombre"], "Segmento": r["parametros"]["segmento"],
         "Método": r["parametros"]["metodo"], "Features": r["parametros"]["n_features"], **r["metricas"]}
         for r in runs if "modelo" in r])
+    referencias_esperadas = {}
+    if nuevo_gvif is not None:
+        referencias_esperadas = {r['nombre']:r for r in runs if r['nombre'] in
+            {'F2_01_Preparacion_Datos','F2_02_Segmentacion_BoxCox'} or
+            r['nombre'].startswith(('F2_04_','F2_06_'))}
+        runs = [r for r in runs if r['nombre'].startswith('F2_08_')]
+        # La figura comparativa existente se conserva íntegra como artefacto.
+        for r in runs:
+            r['archivos'].update({f'graficos/comparativa/{k}':v for k,v in evidencia['Modelo_OLS'][1].items()
+                                 if k.startswith('celda_126_')})
     for r in runs:
         r["identidad"] = sha(json_bytes({"contexto": contexto, "nombre": r["nombre"], "parametros": r["parametros"],
                                        "metricas": r["metricas"]}))
     return {"raiz": raiz, "runs": runs, "contexto": contexto, "parametros": parametros,
-            "transformadores": transformador, "train": train, "test": test}
+            "transformadores": transformador, "train": train, "test": test,
+            "referencias_esperadas":referencias_esperadas}
 
 
 def markdown(tabla):
@@ -369,10 +407,10 @@ def _completar_validacion(raiz, runs, registro, train, etiquetas):
     import matplotlib.pyplot as plt
     import seaborn as sns
     colores = dict(zip(SEGMENTOS, ["#1f77b4", "#2ca02c", "#ff7f0e", "#d62728"]))
-    datos = raiz / "Fase_2/data"
+    datos = raiz / "Ventas/Fase2_PropUsadas/data"
     meta = pd.read_csv(datos / "metadatos_train_ols_usadas.csv")
     assert len(meta) == len(train) and meta.id.is_unique
-    raw = pd.read_csv(raiz / "Ventas/Propiedades_Usadas/data/PropUsadas_Integrado.csv").set_index("id", drop=False)
+    raw = pd.read_csv(raiz / "Ventas/Fase1_PropUsadas/data/PropUsadas_Integrado.csv").set_index("id", drop=False)
     raw = raw.loc[meta.id].reset_index(drop=True)
     np.testing.assert_array_equal(raw.price_rub, train.price_rub)
     preparados = {}
@@ -423,7 +461,7 @@ def _completar_validacion(raiz, runs, registro, train, etiquetas):
             sns.boxplot(data=detalle, y="Característica", x="ΔRMSE RUB", order=resumen["Característica"].tolist(),
                         color=colores[s], ax=ax, flierprops={"markersize": 3, "alpha": .5})
             ax.axvline(0, color="black", linestyle="--", linewidth=1)
-            ax.set(title=f"{s} — BSS exhaustivo — 30 permutaciones por característica",
+            ax.set(title=f"{s} — {r['parametros']['metodo']} — 30 permutaciones por característica",
                    xlabel="Incremento del RMSE de validación (RUB)", ylabel="")
             ax.ticklabel_format(axis="x", style="plain", useOffset=False)
             fig.tight_layout()
@@ -486,6 +524,8 @@ def _exportar(r, plan, carpeta, ids):
         if r["referencia"] not in ids:
             raise ConflictoRegistro("El modelo de referencia no tiene un run verificado.")
         parametros["reference_run_id"] = ids[r["referencia"]]
+    if 'referencia_bss_anterior' in r:
+        parametros['previous_bss_run_id']=ids[r['referencia_bss_anterior']]
     if "modelo" in r:
         if "F2_01_Preparacion_Datos" not in ids:
             raise ConflictoRegistro("Falta el preprocesador remoto verificado.")
@@ -512,13 +552,13 @@ def _exportar(r, plan, carpeta, ids):
             joblib.dump({"modelo": interno, "lambda_interno": parametros["boxcox_lambda_interno"],
                          "preparadores_run_id": ids["F2_02_Segmentacion_BoxCox"],
                          "preparadores_artifact": "preparadores_validacion_interna.joblib",
-                         "clave_preparador": parametros["metodo"]}, buffer, compress=3)
+                         "clave_preparador": 'BSS exhaustivo' if parametros['metodo']=='BSS GVIF' else parametros["metodo"]}, buffer, compress=3)
             archivos["modelo_validacion_segmento.joblib"] = buffer.getvalue()
     if "transformadores" in r:
         # Única copia remota compartida, con sus reglas aprendidas de train.
-        archivos["transformadores_ols_usadas.joblib"] = (plan["raiz"] / "Fase_2/data/transformadores_ols_usadas.joblib").read_bytes()
+        archivos["transformadores_ols_usadas.joblib"] = (plan["raiz"] / "Ventas/Fase2_PropUsadas/data/transformadores_ols_usadas.joblib").read_bytes()
         for nombre in ["registro_experimentos.py", "bss_features_usadas.py"]:
-            archivos[f"codigo/{nombre}"] = (plan["raiz"] / "Fase_2" / nombre).read_bytes()
+            archivos[f"codigo/{nombre}"] = (plan["raiz"] / "Ventas/Fase2_PropUsadas" / nombre).read_bytes()
     if "tabla" in r:
         archivos["resultados/comparacion_general.md"] = markdown(r["tabla"].T.rename_axis("Métrica").reset_index()).encode()
         archivos["referencias_runs.json"] = json_bytes(ids)
@@ -585,6 +625,22 @@ def registrar_experimentos(plan, cliente=None, progreso=print):
             raise ConflictoRegistro("El experimento existe archivado; no se modifica automáticamente.")
         eid = exp.experiment_id
     filas, ids = [], {}
+    for nombre, esperado in plan.get('referencias_esperadas',{}).items():
+        candidatos=_buscar_runs(cliente,eid,f"tags.fase2_base = '{nombre}'")
+        candidatos=[r for r in candidatos if r.info.status=='FINISHED']
+        if len(candidatos)!=1:
+            raise ConflictoRegistro(f'Referencia histórica ambigua o ausente: {nombre}')
+        ref=candidatos[0]
+        with TemporaryDirectory(prefix='verificar_referencia_f2_') as tmp:
+            procedencia=Path(cliente.download_artifacts(ref.info.run_id,'procedencia.json',tmp))
+            huellas=json.loads(procedencia.read_text(encoding='utf-8'))['huellas']
+            for relativa,huella in plan['contexto']['huellas'].items():
+                if relativa.startswith('Ventas/Fase2_PropUsadas/data/') and 'bss_features/' not in relativa:
+                    assert huellas.get(relativa, huellas.get(relativa.replace('Ventas/Fase2_PropUsadas/', 'Fase_2/')))==huella,relativa
+            if 'modelo' in esperado:
+                recuperado=joblib.load(cliente.download_artifacts(ref.info.run_id,'modelo_segmento.joblib',tmp))
+                np.testing.assert_array_equal(recuperado['modelo'].params,esperado['modelo'].params)
+        ids[nombre]=ref.info.run_id
     for r in plan["runs"]:
         rid = None
         creado = False
@@ -642,7 +698,8 @@ def inventario_artefactos(plan, destino_temporal):
     carpeta = Path(destino_temporal).resolve()
     if carpeta.is_relative_to(plan["raiz"]):
         raise ValueError("El inventario requiere un temporal fuera del repositorio.")
-    ids, filas = {}, []
+    ids = {nombre:'ID_REMOTO_PENDIENTE_'+nombre for nombre in plan.get('referencias_esperadas',{})}
+    filas = []
     for r in plan["runs"]:
         salida = carpeta / r["nombre"]
         salida.mkdir(parents=True)
